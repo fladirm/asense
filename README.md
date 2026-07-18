@@ -86,9 +86,12 @@ The privileged protocol requires a newline-terminated `HELLO 1` as its first
 frame and returns a `protocol=1` daemon receipt; rejected negotiation closes the
 session. After negotiation it accepts only exact `OK` or `ERR` response tokens.
 A valid command `ERR` leaves the healthy session open; only a transport failure,
-timeout or malformed protocol response invalidates it. Manual and Maximum fan
-modes return to firmware Auto when the GUI actually disconnects or the service
-stops.
+timeout or malformed protocol response invalidates it. Manual fan control is a
+session lease and returns to firmware Auto when the GUI disconnects. An explicit
+Maximum request remains active after hardware readback succeeds and the `OK`
+response is written, matching the appliance behavior; incomplete or emergency
+fan transitions still fail safe to Auto. Stopping or restarting the service
+and post-resume reconciliation always restore firmware Auto.
 
 Setters require firmware readback and multi-step writes roll back on failure.
 Profile changes return a typed, stable receipt containing the confirmed Acer
@@ -136,9 +139,9 @@ extract the downloaded asset, then run the installer as the logged-in GNOME
 user, not through `sudo`:
 
 ```bash
-sha256sum --check asense-v0.1.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.1.0-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.1.0-ubuntu-26.04-x86_64-installer-*/
+sha256sum --check asense-v0.1.1-ubuntu-26.04-x86_64-installer-*.zip.sha256
+unzip asense-v0.1.1-ubuntu-26.04-x86_64-installer-*.zip
+cd asense-v0.1.1-ubuntu-26.04-x86_64-installer-*/
 ./install.sh
 ```
 

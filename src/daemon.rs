@@ -215,8 +215,7 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
     let mut reader = BufReader::new(read_stream);
     let mut decoder = CommandDecoder::new();
     let mut protocol = ProtocolSession::new();
-    let mut non_auto = false;
-    let mut emergency_maximum = false;
+    let mut fan_session = FanSessionState::Automatic;
 
     let result = (|| -> Result<(), String> {
         loop {
@@ -229,16 +228,14 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                     ) =>
                 {
-                    if non_auto && !emergency_maximum && thermal_limit_reached(&hardware) {
-                        // The hardware is already non-Auto here. Keep the guard
-                        // set before attempting the emergency transition so every
-                        // exit path retries Auto during cleanup.
-                        non_auto = true;
+                    if fan_session.needs_thermal_watchdog() && thermal_limit_reached(&hardware) {
+                        // Keep the session fail-safe before attempting the
+                        // emergency transition so every exit path retries Auto.
+                        fan_session = FanSessionState::EmergencyMaximum;
                         let _mutation_guard = MutationGuard::acquire()?;
                         hardware
                             .apply_fan_setting(FanSetting::Maximum)
                             .map_err(|error| format!("thermal failsafe failed: {error}"))?;
-                        emergency_maximum = true;
                     }
                     continue;
                 }
@@ -264,15 +261,16 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
                 }
                 ProtocolAction::Dispatch => {}
             }
-            if command == "FAN AUTO" || command.starts_with("FAN MANUAL ") {
-                emergency_maximum = false;
-            }
-            let command_result = execute_command(&hardware, &profiles, command, &mut non_auto);
+            let command_result = execute_command(&hardware, &profiles, command, &mut fan_session);
+            let command_succeeded = command_result.is_ok();
             write_response(&mut stream, command_result)?;
+            if command_succeeded {
+                fan_session.response_delivered();
+            }
         }
     })();
 
-    let cleanup = if non_auto {
+    let cleanup = if fan_session.requires_auto_on_disconnect() {
         match MutationGuard::acquire() {
             Ok(_mutation_guard) => hardware
                 .apply_fan_setting(FanSetting::Automatic)
@@ -289,6 +287,63 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+    }
+}
+
+/// Fan ownership attached to one GUI control session.
+///
+/// Manual control and every incomplete or emergency transition are leases:
+/// losing the client returns ownership to firmware Auto. An explicitly
+/// requested Maximum mode becomes persistent only after the hardware readback
+/// succeeded and the matching `OK` response was written to the client socket.
+/// This mirrors the appliance behavior users expect without weakening failure
+/// cleanup.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FanSessionState {
+    #[default]
+    Automatic,
+    PendingMutation,
+    Manual,
+    MaximumAwaitingResponse,
+    PersistentMaximum,
+    EmergencyMaximum,
+}
+
+impl FanSessionState {
+    fn begin_mutation(&mut self) {
+        *self = Self::PendingMutation;
+    }
+
+    fn automatic_readback_confirmed(&mut self) {
+        *self = Self::Automatic;
+    }
+
+    fn manual_readback_confirmed(&mut self) {
+        *self = Self::Manual;
+    }
+
+    fn maximum_readback_confirmed(&mut self) {
+        *self = Self::MaximumAwaitingResponse;
+    }
+
+    fn response_delivered(&mut self) {
+        if *self == Self::MaximumAwaitingResponse {
+            *self = Self::PersistentMaximum;
+        }
+    }
+
+    fn needs_thermal_watchdog(self) -> bool {
+        matches!(self, Self::PendingMutation | Self::Manual)
+    }
+
+    fn requires_auto_on_disconnect(self) -> bool {
+        matches!(
+            self,
+            Self::PendingMutation
+                | Self::Manual
+                | Self::MaximumAwaitingResponse
+                | Self::EmergencyMaximum
+        )
     }
 }
 
@@ -341,9 +396,18 @@ fn execute_command(
     hardware: &AcerHardware,
     profiles: &ProfileController,
     command: &str,
-    non_auto: &mut bool,
+    fan_session: &mut FanSessionState,
 ) -> Result<String, String> {
     let fields: Vec<&str> = command.split_ascii_whitespace().collect();
+    if matches!(
+        fields.as_slice(),
+        ["FAN", "AUTO"] | ["FAN", "MAXIMUM"] | ["FAN", "MANUAL", _, _]
+    ) {
+        // Establish fail-safe cleanup before lock acquisition or parsing. A
+        // rejected, interrupted or partially applied fan mutation must never
+        // inherit a previously persistent Maximum session state.
+        fan_session.begin_mutation();
+    }
     let _mutation_guard = command_is_mutation(&fields)
         .then(MutationGuard::acquire)
         .transpose()?;
@@ -353,30 +417,29 @@ fn execute_command(
             MEMORY_HARDWARE.get_or_init(read_privileged_memory_hardware),
         )),
         ["FAN", "AUTO"] => {
-            *non_auto = true;
             hardware
                 .apply_fan_setting(FanSetting::Automatic)
                 .map_err(|error| error.to_string())?;
-            *non_auto = false;
+            fan_session.automatic_readback_confirmed();
             Ok("fan=auto".to_string())
         }
         ["FAN", "MAXIMUM"] => {
-            *non_auto = true;
             hardware
                 .apply_fan_setting(FanSetting::Maximum)
                 .map_err(|error| error.to_string())?;
+            fan_session.maximum_readback_confirmed();
             Ok("fan=maximum".to_string())
         }
         ["FAN", "MANUAL", cpu, gpu] => {
             let cpu = parse_manual_percent(cpu)?;
             let gpu = parse_manual_percent(gpu)?;
-            *non_auto = true;
             hardware
                 .apply_fan_setting(FanSetting::Manual {
                     cpu_percent: cpu,
                     gpu_percent: gpu,
                 })
                 .map_err(|error| error.to_string())?;
+            fan_session.manual_readback_confirmed();
             Ok(format!("fan=manual cpu={cpu} gpu={gpu}"))
         }
         ["PROFILE", profile] => {
@@ -665,9 +728,9 @@ fn ensure_root() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandDecoder, MAX_COMMAND_BYTES, MAX_RESPONSE_PAYLOAD_BYTES, ProtocolAction,
-        ProtocolSession, command_is_mutation, parse_color, parse_manual_percent, parse_on_off,
-        protocol_handshake, sanitize_response_payload, write_response,
+        CommandDecoder, FanSessionState, MAX_COMMAND_BYTES, MAX_RESPONSE_PAYLOAD_BYTES,
+        ProtocolAction, ProtocolSession, command_is_mutation, parse_color, parse_manual_percent,
+        parse_on_off, protocol_handshake, sanitize_response_payload, write_response,
     };
     use crate::control::MAX_CONTROL_RESPONSE_LINE_BYTES;
     use std::io::{BufRead, BufReader, Cursor};
@@ -698,6 +761,52 @@ mod tests {
         assert!(!parse_on_off("OFF", "test").unwrap());
         assert!(parse_on_off("on", "test").is_err());
         assert!(parse_on_off("1", "test").is_err());
+    }
+
+    #[test]
+    fn acknowledged_explicit_maximum_survives_client_disconnect() {
+        let mut session = FanSessionState::Automatic;
+        session.begin_mutation();
+        session.maximum_readback_confirmed();
+
+        assert!(session.requires_auto_on_disconnect());
+        session.response_delivered();
+        assert_eq!(session, FanSessionState::PersistentMaximum);
+        assert!(!session.requires_auto_on_disconnect());
+        assert!(!session.needs_thermal_watchdog());
+    }
+
+    #[test]
+    fn manual_and_emergency_maximum_remain_disconnect_leases() {
+        let mut session = FanSessionState::Automatic;
+        session.begin_mutation();
+        session.manual_readback_confirmed();
+        session.response_delivered();
+
+        assert_eq!(session, FanSessionState::Manual);
+        assert!(session.needs_thermal_watchdog());
+        assert!(session.requires_auto_on_disconnect());
+
+        session = FanSessionState::EmergencyMaximum;
+        assert!(session.requires_auto_on_disconnect());
+        assert!(!session.needs_thermal_watchdog());
+    }
+
+    #[test]
+    fn pending_or_unacknowledged_maximum_fails_closed_to_auto() {
+        let mut session = FanSessionState::PersistentMaximum;
+        session.begin_mutation();
+        assert_eq!(session, FanSessionState::PendingMutation);
+        assert!(session.needs_thermal_watchdog());
+        assert!(session.requires_auto_on_disconnect());
+
+        session.maximum_readback_confirmed();
+        assert_eq!(session, FanSessionState::MaximumAwaitingResponse);
+        assert!(session.requires_auto_on_disconnect());
+
+        session.automatic_readback_confirmed();
+        assert_eq!(session, FanSessionState::Automatic);
+        assert!(!session.requires_auto_on_disconnect());
     }
 
     #[test]

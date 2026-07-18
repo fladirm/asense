@@ -1466,4 +1466,4 @@ module_wmi_driver(asense_rgb_driver);
 MODULE_AUTHOR("ASense contributors");
 MODULE_DESCRIPTION("Acer Predator PHN16-72 verified WMI control transport");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.1.0");
+MODULE_VERSION("0.1.1");

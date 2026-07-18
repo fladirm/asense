@@ -49,8 +49,8 @@ staged or untracked worktree changes.
 Review the clean commit, then create and push the matching annotated tag:
 
 ```bash
-git tag -a v0.1.0 -m "ASense v0.1.0"
-git push origin main v0.1.0
+git tag -a v0.1.1 -m "ASense v0.1.1"
+git push origin main v0.1.1
 ```
 
 `.github/workflows/release.yml` independently runs the gate on Ubuntu 26.04,

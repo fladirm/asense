@@ -151,6 +151,111 @@ fn localized_status(language: Language, status: &str) -> String {
     }
 }
 
+fn compact_status(language: Language, status: &str) -> String {
+    for (czech, english) in [
+        ("Telemetrie se obnovuje", "Telemetry reconnecting"),
+        ("Telemetrie se připojuje", "Telemetry connecting"),
+    ] {
+        if status.contains(czech) || status.contains(english) {
+            return tr(language, czech, english).to_string();
+        }
+    }
+
+    let profile = status
+        .strip_prefix("Profil potvrzen: Acer ")
+        .or_else(|| status.strip_prefix("Profile verified: Acer "))
+        .and_then(|details| details.split(" ·").next());
+    if let Some(profile) = profile {
+        let (czech, english) = match profile {
+            "low-power" => ("Eco potvrzeno", "Eco verified"),
+            "quiet" => ("Tichý potvrzen", "Quiet verified"),
+            "balanced" => ("Balanc potvrzen", "Balanced verified"),
+            "balanced-performance" => ("Výkon potvrzen", "Performance verified"),
+            "performance" => ("Turbo potvrzeno", "Turbo verified"),
+            _ => ("Profil potvrzen", "Profile verified"),
+        };
+        return tr(language, czech, english).to_string();
+    }
+
+    for (source_czech, source_english, compact_czech, compact_english) in [
+        (
+            "Nastavení potvrzeno firmwarem",
+            "Settings confirmed by firmware",
+            "Nastavení potvrzeno",
+            "Settings verified",
+        ),
+        (
+            "Zapisuji a ověřuji firmware",
+            "Writing and verifying firmware",
+            "Ověřuji nastavení",
+            "Verifying settings",
+        ),
+        (
+            "Platforma znovu načtena",
+            "Platform state refreshed",
+            "Platforma obnovena",
+            "Platform refreshed",
+        ),
+    ] {
+        if status == source_czech || status == source_english {
+            return tr(language, compact_czech, compact_english).to_string();
+        }
+    }
+
+    if status.starts_with("Částečné capabilities:") || status.starts_with("Partial capabilities:")
+    {
+        return tr(language, "Částečný readback", "Partial readback").to_string();
+    }
+
+    let mismatch = status
+        .strip_prefix("GPU profil není synchronní:")
+        .or_else(|| status.strip_prefix("GPU profile is out of sync:"));
+    if let Some(mismatch) = mismatch {
+        let values = mismatch
+            .trim()
+            .replace("core ", "")
+            .replace("VRAM ", "")
+            .replace(" / ", "/");
+        return format!("{}: {values}", tr(language, "GPU nesedí", "GPU mismatch"));
+    }
+
+    let lower = status.to_ascii_lowercase();
+    if lower.contains("rollback") && lower.contains("failed") {
+        return tr(language, "Rollback selhal", "Rollback failed").to_string();
+    }
+    if lower.contains("readback") || lower.contains("verification failed") {
+        return tr(
+            language,
+            "Ověření stavu selhalo",
+            "State verification failed",
+        )
+        .to_string();
+    }
+    if lower.contains("unsupported") || lower.contains("not supported") {
+        return tr(
+            language,
+            "Firmware funkci nepodporuje",
+            "Unsupported by firmware",
+        )
+        .to_string();
+    }
+    if lower.contains("timed out") || lower.contains("timeout") || lower.contains("control socket")
+    {
+        return tr(
+            language,
+            "Řídicí služba neodpovídá",
+            "Control service unavailable",
+        )
+        .to_string();
+    }
+
+    if status.chars().count() > 28 {
+        tr(language, "Podrobnosti nahoře", "Details above").to_string()
+    } else {
+        status.to_string()
+    }
+}
+
 fn design_width(advanced: bool) -> f64 {
     if advanced {
         ADVANCED_DESIGN_WIDTH
@@ -2107,6 +2212,20 @@ fn CoolingOverview(telemetry: Telemetry) -> Element {
     }
 }
 
+fn keyboard_editor_readback(lighting: &KeyboardLightingState) -> Option<(u8, [u32; 4])> {
+    if !lighting.available {
+        return None;
+    }
+    let mut editor_colors = lighting.zones;
+    if matches!(lighting.mode, 1 | 4) {
+        // Breathing and Shifting use the firmware's single effect color. The
+        // first color well is also the effect-color editor, so seed it from
+        // that readback instead of from the last static zone configuration.
+        editor_colors[0] = lighting.color;
+    }
+    Some((lighting.brightness, editor_colors))
+}
+
 #[component]
 fn ControlDock(
     fan_mode: FanMode,
@@ -2138,6 +2257,20 @@ fn ControlDock(
     let mut zone2 = use_signal(move || initial_colors[1]);
     let mut zone3 = use_signal(move || initial_colors[2]);
     let mut zone4 = use_signal(move || initial_colors[3]);
+    let lighting_editor_readback = keyboard_editor_readback(&lighting);
+    use_effect(use_reactive(
+        (&lighting_editor_readback,),
+        move |(readback,)| {
+            let Some((brightness, zones)) = readback else {
+                return;
+            };
+            keyboard_brightness.set(brightness);
+            zone1.set(zones[0]);
+            zone2.set(zones[1]);
+            zone3.set(zones[2]);
+            zone4.set(zones[3]);
+        },
+    ));
 
     let manual = fan_editor_open();
     let selected_fan_mode = if manual { FanMode::Manual } else { fan_mode };
@@ -2228,6 +2361,7 @@ fn ControlDock(
                         }
                         div { class: "lighting-actions",
                             button {
+                                class: if lighting.mode == 0 { "active" } else { "" },
                                 r#type: "button",
                                 disabled: !enabled,
                                 onclick: move |_| on_keyboard_zones.call(KeyboardZonesRequest {
@@ -2237,6 +2371,7 @@ fn ControlDock(
                                 {tr(language, "Statické", "Static")}
                             }
                             button {
+                                class: if lighting.mode == 1 { "active" } else { "" },
                                 r#type: "button",
                                 disabled: !enabled,
                                 onclick: move |_| on_keyboard_effect.call(KeyboardEffectRequest {
@@ -2245,6 +2380,7 @@ fn ControlDock(
                                 {tr(language, "Dech", "Breathing")}
                             }
                             button {
+                                class: if lighting.mode == 3 { "active" } else { "" },
                                 r#type: "button",
                                 disabled: !enabled,
                                 onclick: move |_| on_keyboard_effect.call(KeyboardEffectRequest {
@@ -2253,6 +2389,7 @@ fn ControlDock(
                                 {tr(language, "Vlna", "Wave")}
                             }
                             button {
+                                class: if lighting.mode == 4 { "active" } else { "" },
                                 r#type: "button",
                                 disabled: !enabled,
                                 onclick: move |_| on_keyboard_effect.call(KeyboardEffectRequest {
@@ -2355,9 +2492,10 @@ fn StatusBar(
         HealthState::Applying => "status-line applying",
         HealthState::Warning => "status-line warning",
     };
+    let displayed_status = compact_status(language, &status_message);
     rsx! {
         footer { class,
-            span { class: "status-text", "{status_message}" }
+            span { class: "status-text", title: "{status_message}", "{displayed_status}" }
             span { class: "power-readout",
                 "GPU "
                 strong { "{power_usage_limit(telemetry.gpu_power_w, telemetry.gpu_enforced_power_limit_w)}" }
@@ -2444,11 +2582,25 @@ fn AdvancedPanel(
     let memory_clock_points = graph_points(&history, |point| point.gpu_memory_clock_mhz, 10_000.0);
     let history_seconds = history.len.max(1);
     let throttle = clock_event_label(telemetry.gpu_clock_event_reasons, language);
-    let throttle_class = if has_real_throttle(telemetry.gpu_clock_event_reasons) {
+    let telemetry_error = telemetry.gpu_error.as_deref();
+    let throttle_class = if telemetry_error.is_some() {
+        "throttle-state telemetry-error"
+    } else if has_real_throttle(telemetry.gpu_clock_event_reasons) {
         "throttle-state active"
     } else {
         "throttle-state"
     };
+    let throttle_label = if telemetry_error.is_some() {
+        "NVIDIA"
+    } else {
+        tr(language, "Důvody omezení taktu", "Clock / throttle reasons")
+    };
+    let throttle_summary = if telemetry_error.is_some() {
+        tr(language, "Chyba čtení", "Readback error").to_string()
+    } else {
+        throttle
+    };
+    let throttle_title = telemetry_error.unwrap_or("");
 
     rsx! {
         aside { class: "advanced-panel", "aria-label": tr(language, "Rozšířené systémové informace", "Advanced system information"),
@@ -2591,17 +2743,12 @@ fn AdvancedPanel(
                 }
                 }
 
-                div { class: throttle_class,
-                span { {tr(language, "Důvody omezení taktu", "Clock / throttle reasons")} }
-                strong { "{throttle}" }
-                code { "0x{telemetry.gpu_clock_event_reasons.unwrap_or_default():016x}" }
+                div { class: throttle_class, title: "{throttle_title}",
+                span { "{throttle_label}" }
+                strong { "{throttle_summary}" }
+                if telemetry_error.is_none() {
+                    code { "0x{telemetry.gpu_clock_event_reasons.unwrap_or_default():016x}" }
                 }
-
-                if let Some(error) = telemetry.gpu_error.as_deref() {
-                    div { class: "telemetry-warning", title: "{error}",
-                        strong { {tr(language, "Telemetrie NVIDIA", "NVIDIA telemetry")} }
-                        span { "{error}" }
-                    }
                 }
                 }
             } else if tab() == AdvancedTab::Hardware {
@@ -2945,22 +3092,19 @@ fn PlatformAdvanced(
     let readback_text = if busy {
         tr(language, "Ověřuji", "Verifying")
     } else if error.is_some() || state.read_error_mask != 0 {
-        tr(language, "Chyba readbacku", "Readback error")
+        tr(language, "Chyba čtení", "Read error")
     } else {
-        tr(language, "Readback ověřen", "Readback verified")
+        tr(language, "Ověřeno", "Verified")
     };
-
-    let page_class = if error.is_some() {
-        "advanced-content platform-page has-error"
+    let readback_class = if error.is_some() || state.read_error_mask != 0 {
+        "platform-readback warning"
     } else {
-        "advanced-content platform-page"
+        "platform-readback"
     };
+    let readback_title = error.as_deref().unwrap_or("");
 
     rsx! {
-        section { class: page_class,
-            if let Some(error) = error.as_deref() {
-                div { class: "platform-error", "{error}" }
-            }
+        section { class: "advanced-content platform-page",
             div { class: "device-bento",
                 SettingToggle {
                     class_name: "device-battery-limit",
@@ -3109,8 +3253,8 @@ fn PlatformAdvanced(
                 }
                 }
 
-                div { class: "platform-readback",
-                    span { {tr(language, "Ověření firmwarem", "Firmware readback")} }
+                div { class: readback_class, title: "{readback_title}",
+                    span { "Firmware" }
                     strong { "{readback_text}" }
                     button {
                         disabled: busy,
@@ -3663,13 +3807,14 @@ mod tests {
     use super::{
         ADVANCED_DESIGN_WIDTH, APP_CSS_SOURCE, AppState, COMPACT_DESIGN_WIDTH, ControlAction,
         ControlOutcome, ControlRequest, ControlResultSlot, ControlUpdate, FanMode, HardwareProfile,
-        HealthState, Language, MIN_WINDOW_HEIGHT, PROFILE_SYNC_GRACE_SAMPLES, PlatformAction,
-        PlatformProfile, RuntimeState, TELEMETRY_HISTORY_CAPACITY, TITLEBAR_DESIGN_HEIGHT,
-        TelemetryHistory, TelemetryPoint, TelemetrySlot, TelemetryUpdate, WORKSPACE_DESIGN_HEIGHT,
-        apply_control_update, aspect_constrained_size, begin_control_request, graph_points,
-        logical_window_size, merge_privileged_memory, parse_lighting_state, physical_size_close,
-        power_usage_limit, reconcile_profile_telemetry, setting_toggle_text, telemetry_retry_delay,
-        workspace_aspect_ratio,
+        HealthState, KeyboardLightingState, Language, MIN_WINDOW_HEIGHT,
+        PROFILE_SYNC_GRACE_SAMPLES, PlatformAction, PlatformProfile, RuntimeState,
+        TELEMETRY_HISTORY_CAPACITY, TITLEBAR_DESIGN_HEIGHT, TelemetryHistory, TelemetryPoint,
+        TelemetrySlot, TelemetryUpdate, WORKSPACE_DESIGN_HEIGHT, apply_control_update,
+        aspect_constrained_size, begin_control_request, compact_status, graph_points,
+        keyboard_editor_readback, logical_window_size, merge_privileged_memory,
+        parse_lighting_state, physical_size_close, power_usage_limit, reconcile_profile_telemetry,
+        setting_toggle_text, telemetry_retry_delay, workspace_aspect_ratio,
     };
     use crate::control::ProfileApplyReceipt;
     use crate::telemetry::MemoryHardwareInfo;
@@ -3694,6 +3839,78 @@ mod tests {
         assert_eq!(language, Language::English);
         assert_eq!(language.code(), "EN");
         assert_eq!(language.html_code(), "en");
+    }
+
+    #[test]
+    fn keyboard_editor_uses_only_confirmed_firmware_readback() {
+        assert_eq!(
+            keyboard_editor_readback(&KeyboardLightingState::default()),
+            None
+        );
+
+        let lighting = KeyboardLightingState {
+            available: true,
+            brightness: 63,
+            zones: [0x12_3456, 0xab_cdef, 0x00_1020, 0xfe_dcba],
+            ..KeyboardLightingState::default()
+        };
+        assert_eq!(
+            keyboard_editor_readback(&lighting),
+            Some((63, [0x12_3456, 0xab_cdef, 0x00_1020, 0xfe_dcba]))
+        );
+
+        let effect = KeyboardLightingState {
+            mode: 1,
+            color: 0x66_33cc,
+            ..lighting
+        };
+        assert_eq!(
+            keyboard_editor_readback(&effect),
+            Some((63, [0x66_33cc, 0xab_cdef, 0x00_1020, 0xfe_dcba]))
+        );
+    }
+
+    #[test]
+    fn compact_status_keeps_basic_receipts_readable_in_both_languages() {
+        let turbo = "Profil potvrzen: Acer performance · VF +100/+200 MHz · GPU 115/140 W";
+        assert_eq!(compact_status(Language::Czech, turbo), "Turbo potvrzeno");
+        assert_eq!(
+            compact_status(
+                Language::English,
+                "Profile verified: Acer performance · VF +100/+200 MHz · GPU 115/140 W"
+            ),
+            "Turbo verified"
+        );
+        assert_eq!(
+            compact_status(
+                Language::English,
+                "Částečné capabilities: platform: readback failed: USB charging"
+            ),
+            "Partial readback"
+        );
+        assert_eq!(
+            compact_status(
+                Language::Czech,
+                "GPU profil není synchronní: core +0 / VRAM +200 MHz"
+            ),
+            "GPU nesedí: +0/+200 MHz"
+        );
+        assert_eq!(
+            compact_status(
+                Language::English,
+                "an otherwise unknown diagnostic that is deliberately much too long"
+            ),
+            "Details above"
+        );
+        for status in [
+            "Turbo potvrzeno",
+            "Partial readback",
+            "GPU nesedí: +0/+200 MHz",
+            "Firmware funkci nepodporuje",
+            "Control service unavailable",
+        ] {
+            assert!(status.chars().count() <= 28, "status is too long: {status}");
+        }
     }
 
     #[test]
@@ -4366,6 +4583,18 @@ mod tests {
             assert!(rule.contains("height: 40px"), "{selector}");
             assert!(rule.contains("border:"), "{selector}");
         }
+    }
+
+    #[test]
+    fn transient_advanced_errors_reuse_fixed_status_tiles_without_reflow() {
+        let source = include_str!("app.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(production.contains("\"platform-readback warning\""));
+        assert!(production.contains("\"throttle-state telemetry-error\""));
+        assert!(!production.contains("class: \"platform-error\""));
+        assert!(!production.contains("class: \"telemetry-warning\""));
+        assert!(!APP_CSS_SOURCE.contains(".platform-page.has-error"));
     }
 
     #[test]

@@ -893,6 +893,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .lighting-power button.active,
+.lighting-actions button.active,
 .toggle-button.active,
 .usb-thresholds button.active,
 .binary-buttons button.active {
@@ -1347,37 +1348,6 @@ input[type="range"]::-webkit-slider-thumb {
 
 .throttle-state.active strong { color: var(--amber); }
 
-.telemetry-warning,
-.platform-error {
-  border: 0.977px solid rgba(255, 117, 127, 0.3);
-  border-radius: 8.376px;
-  background: rgba(118, 30, 44, 0.14);
-  color: #ffd7da;
-}
-
-.telemetry-warning {
-  display: grid;
-  gap: 2.443px;
-  padding: 6.98px 8.376px;
-}
-
-.telemetry-warning span {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  text-overflow: clip;
-  white-space: nowrap;
-}
-
-.platform-error {
-  min-width: 0;
-  padding: 5.584px 7.678px;
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: clip;
-  white-space: nowrap;
-}
-
 .hardware-page {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1399,11 +1369,6 @@ input[type="range"]::-webkit-slider-thumb {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-}
-
-.platform-page.has-error {
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 5.584px;
 }
 
 .platform-page.empty {
@@ -1647,6 +1612,17 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .platform-readback strong { color: var(--green); font-family: var(--mono); }
+
+.platform-readback.warning,
+.throttle-state.telemetry-error {
+  border-color: rgba(255, 200, 107, 0.28);
+  background: rgba(128, 81, 21, 0.14);
+}
+
+.platform-readback.warning strong,
+.throttle-state.telemetry-error strong {
+  color: var(--amber);
+}
 
 .calibration-modal-backdrop {
   position: absolute;
