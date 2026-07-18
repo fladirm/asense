@@ -1,0 +1,12 @@
+/target/
+*.log
+*.zip
+*.zip.sha256
+*-SHA256SUMS.txt
+/kernel/.*.cmd
+/kernel/*.ko
+/kernel/*.mod
+/kernel/*.mod.c
+/kernel/*.o
+/kernel/Module.symvers
+/kernel/modules.order

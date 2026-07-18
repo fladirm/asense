@@ -1,0 +1,12 @@
+[Unit]
+Description=ASense protected control socket
+
+[Socket]
+ListenStream=/run/asense-control.sock
+SocketMode=0600
+SocketUser=@TARGET_USER@
+SocketGroup=@TARGET_GROUP@
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-26.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libxdo-dev libssl-dev libelf-dev linux-headers-generic \
+            desktop-file-utils
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 \
+            --profile minimal --component clippy,rustfmt
+          rustup default 1.96.0
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test all Rust targets
+        run: cargo test --locked --all-targets
+
+      - name: Deny Clippy warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Verify the GUI-free privileged helper
+        run: |
+          cargo clippy --locked --bin asensed --no-default-features -- -D warnings
+          cargo build --locked --bin asensed --no-default-features
+
+      - name: Validate packaging scripts
+        run: |
+          bash -n \
+            install.sh \
+            uninstall.sh \
+            packaging/common.sh \
+            scripts/package-release.sh \
+            scripts/verify-release.sh
+          sh -n packaging/asense-system-sleep
+          temporary="$(mktemp -d)"
+          install -D -m 0644 packaging/90-asense-predator-key.hwdb \
+            "$temporary/etc/udev/hwdb.d/90-asense-predator-key.hwdb"
+          systemd-hwdb --root="$temporary" --strict update
+          systemd-hwdb --root="$temporary" query \
+            'evdev:atkbd:dmi:bvnInsyde:bvrV1.18:bd*:svnAcer:pnPredatorPHN16-72:pvr*' | \
+            grep -Fx 'KEYBOARD_KEY_f5=prog1'
+
+      - name: Validate systemd units
+        shell: bash
+        run: |
+          temporary="$(mktemp -d)"
+          trap 'rm -rf -- "$temporary"' EXIT
+          sed 's#/usr/libexec/asense/asensed#/bin/true#g' \
+            packaging/asense.service >"$temporary/asense.service"
+          sed -e 's/@TARGET_USER@/root/g' -e 's/@TARGET_GROUP@/root/g' \
+            packaging/asense.socket.in >"$temporary/asense.socket"
+          systemd-analyze verify \
+            "$temporary/asense.service" "$temporary/asense.socket"
+
+      - name: Validate desktop entry
+        run: desktop-file-validate assets/asense.desktop
+
+      - name: Build the DKMS module against Ubuntu generic headers
+        shell: bash
+        run: |
+          headers="$({
+            find /usr/src -maxdepth 1 -type d \
+              -name 'linux-headers-*-generic' -print
+          } | sort -V | tail -n 1)"
+          test -n "$headers"
+          test -f "$headers/Makefile"
+          make -C "$headers" M="$GITHUB_WORKSPACE/kernel" modules
+          make -C "$headers" M="$GITHUB_WORKSPACE/kernel" clean

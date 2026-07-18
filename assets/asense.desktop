@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ASense
+GenericName=Acer Predator Control
+Comment=Cooling and performance controls for Acer Predator PHN16-72
+Exec=/usr/bin/asense --toggle
+Icon=asense
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=Acer;Predator;fan;cooling;performance;Turbo;
+StartupNotify=true

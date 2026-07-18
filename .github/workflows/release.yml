@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Ubuntu 26.04 release
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install native and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libxdo-dev libssl-dev libelf-dev linux-headers-generic \
+            desktop-file-utils systemd zip
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 \
+            --profile minimal --component clippy,rustfmt
+          rustup default 1.96.0
+
+      - name: Verify release candidate
+        run: scripts/verify-release.sh
+
+      - name: Build release assets
+        env:
+          ASENSE_RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/package-release.sh
+
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "ASense $GITHUB_REF_NAME" \
+            --generate-notes \
+            asense-v*.zip \
+            asense-v*.zip.sha256 \
+            asense-v*-SHA256SUMS.txt

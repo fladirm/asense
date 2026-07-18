@@ -1,0 +1,45 @@
+[Unit]
+Description=ASense Acer firmware control service
+Requires=asense.socket
+After=asense.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/asense/asensed --daemon
+ExecReload=/usr/libexec/asense/asensed --resume
+# A failed best-effort firmware reset must not poison an otherwise clean stop
+# or trigger Restart=on-failure; the command failure remains visible in journal.
+ExecStopPost=-/usr/libexec/asense/asensed --failsafe-auto
+Restart=on-failure
+RestartSec=1s
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+# NVIDIA's clock-offset ioctl requires CAP_SYS_ADMIN even for uid 0. Retain
+# only that capability so the verified Turbo transaction can apply and read
+# back its OEM +100/+200 MHz offsets without dropping the remaining sandbox.
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+PrivateTmp=true
+PrivateNetwork=true
+IPAddressDeny=any
+ProtectHome=true
+ProtectSystem=strict
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+TasksMax=32
+MemoryMax=128M

@@ -1,0 +1,4 @@
+# Acer Predator PHN16-72 PredatorSense key.  The adjacent PHN16-71 uses the
+# same atkbd scan code; PHN16-72 is missing this one mapping upstream.
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnAcer*:pnPredatorPHN16-72:*
+ KEYBOARD_KEY_f5=prog1
