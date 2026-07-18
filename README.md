@@ -1,27 +1,21 @@
 # ASense
 
-**CZ:** Nativní ovládací panel pro Acer Predator Helios Neo 16
-**PHN16-72** na Linuxu. ASense spojuje výkonové profily, ventilátory,
-čtyřzónové RGB, vybrané platformní funkce a živou hardwarovou telemetrii do
-jedné CZ/EN aplikace. Firmware transport je záměrně povolen jen pro ověřený
-model **PHN16-72**; BIOS verze se reportuje diagnosticky, ale není umělým
-compatibility gate.
-
-**EN:** A native Linux control panel for the Acer Predator Helios Neo 16
+A native Linux control panel for the Acer Predator Helios Neo 16
 **PHN16-72**. ASense combines performance profiles, fan control, four-zone
-RGB, selected platform controls and live hardware telemetry in one bilingual
-CZ/EN application. Firmware writes are deliberately gated to the verified
-**PHN16-72** model. The BIOS version is reported diagnostically, while
-capability probes and verified readback protect writes across BIOS updates.
+RGB, selected platform controls and live hardware telemetry in one application,
+with English as the default and an optional Czech localization. Firmware writes
+are deliberately gated to the verified **PHN16-72** model. The BIOS version is
+reported diagnostically, while capability probes and verified readback protect
+writes across BIOS updates.
 
-## Screenshots / Náhledy
+## Screenshots
 
 <p align="center">
   <img src="docs/screenshots/asense-compact.png" alt="ASense compact control panel" width="32%">
   <img src="docs/screenshots/asense-advanced.png" alt="ASense advanced metrics panel" width="63%">
 </p>
 
-## Features / Funkce
+## Features
 
 - Eco, Quiet, Balanced, Performance and Turbo firmware profiles;
 - firmware Auto, independent manual CPU/GPU and Maximum fan modes;
@@ -50,7 +44,7 @@ calibration. Keep an AC adapter connected for the entire cycle. The public
 firmware interface exposes no decoded completion event; after the cycle,
 refresh the readback and stop calibration manually if it remains active.
 
-## Supported hardware / Podporovaný hardware
+## Supported hardware
 
 | Component | Required value |
 | --- | --- |
@@ -80,7 +74,7 @@ an unofficial partial-control mode. The NVIDIA GPU is optional for the Acer
 control plane, but OEM NVIDIA writes are enabled only for the tested RTX 4070
 PCI/subsystem identity shown above.
 
-## Architecture / Architektura
+## Architecture
 
 ASense is primarily written in **Rust 2024**. The desktop UI uses
 **Dioxus 0.7 + GTK/WebKitGTK**. An unprivileged GUI talks through a protected
@@ -109,7 +103,7 @@ Acer stream: NVIDIA-only values become unavailable with a diagnostic while
 NVML is reopened. Telemetry failures do not overwrite the result of a verified
 control operation.
 
-## Prebuilt release / Předkompilované vydání
+## Prebuilt release
 
 The recommended GitHub installation path is the
 [`ubuntu-26.04-x86_64-installer` ZIP](https://github.com/fladirm/asense/releases/latest).
@@ -154,7 +148,7 @@ the versioned daemon protocol. A Secure Boot system may first require
 [MOK enrollment](#secure-boot); after enrollment and reboot, run the installer
 again.
 
-## Build from source / Sestavení ze zdrojů
+## Build from source
 
 Source builds are supported on the same Ubuntu 26.04 release baseline. Building
 on another distribution can adapt the userspace ABI to that system, but it does
@@ -184,7 +178,7 @@ cargo build --release --locked --bin asense --features gui
 The two explicit build commands are intentional: `asensed` is the privileged,
 GUI-free service binary, while `asense` is the unprivileged desktop binary.
 
-## Installation, upgrades and verification / Instalace, aktualizace a kontrola
+## Installation, upgrades and verification
 
 Run the installer as the logged-in desktop user, **not** through `sudo`. It
 requests elevation only for system operations:
@@ -233,7 +227,7 @@ modinfo -F version asense_rgb
 cat /usr/libexec/asense/INSTALL-PROVENANCE.txt
 ```
 
-### Predator hardware key / Hardwarová klávesa Predator
+### Predator hardware key
 
 On the tested PHN16-72, the installer maps the PredatorSense key's `atkbd`
 scan code to `XF86Launch1` and registers `/usr/bin/asense --toggle` through
@@ -276,18 +270,14 @@ limit, USB charging, boot sound, LCD override and rear logo) deliberately
 remain as configured. Uninstalling the application is not treated as a
 firmware factory reset.
 
-## AS IS / Bez záruky
+## AS IS
 
 ASense is provided **AS IS**, without warranty, fitness guarantee or an
 obligation to provide individual support. Firmware and power controls can
 change hardware behaviour; users remain responsible for backups, cooling and
 reviewing changes before use.
 
-ASense je poskytován **TAK, JAK JE**, bez záruky, garance vhodnosti nebo nároku
-na individuální podporu. Firmware a výkonové ovladače mohou měnit chování
-hardwaru; uživatel odpovídá za zálohy, chlazení a kontrolu změn před použitím.
-
-## Release assets / Vydání
+## Release assets
 
 Prebuilt binaries belong to a GitHub **Release**, not to Git history. A pushed
 `v*` tag runs the complete Ubuntu 26.04 release gate and publishes the installer
@@ -321,7 +311,7 @@ ASense binds only to the exact PHN16-72 DMI model. A BIOS update does not by
 itself disable the application: required interfaces are capability-probed and
 every mutation is verified by firmware readback with rollback on disagreement.
 
-## Author and license / Autor a licence
+## Author and license
 
 **Fladirmacht** — <fladirmacht@gmail.com>
 
