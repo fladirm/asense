@@ -1,0 +1,3 @@
+# GitHub has no native Bitcoin funding key. This HTTPS page contains the
+# project's public Bitcoin donation address and matching QR code.
+custom: "https://github.com/fladirm/asense/blob/main/DONATE.md"

@@ -56,7 +56,10 @@ asense_run_with_package_lock() {
   asense_root chmod 0600 "$ASENSE_PACKAGE_LOCK"
 
   if asense_root flock --exclusive --nonblock --conflict-exit-code 75 \
-    "$ASENSE_PACKAGE_LOCK" env ASENSE_PACKAGE_LOCK_HELD=1 "$script" "$@"; then
+    "$ASENSE_PACKAGE_LOCK" env \
+    ASENSE_PACKAGE_LOCK_HELD=1 \
+    ASENSE_DAEMON_BINARY="${ASENSE_DAEMON_BINARY:-}" \
+    "$script" "$@"; then
     exit 0
   else
     status=$?
@@ -152,10 +155,17 @@ asense_install_shortcut() {
 
 asense_remove_shortcut() {
   local binding="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$ASENSE_SHORTCUT_PATH"
+  local command
 
   if ! asense_gsettings_ready; then
     ASENSE_SHORTCUT_STATUS="unavailable"
     asense_warn "GNOME session bus is unavailable; remove the ASense custom shortcut after login"
+    return 0
+  fi
+  command="$(asense_as_target gsettings get "$binding" command)" || return 1
+  if [[ "$command" != "'/usr/bin/asense --toggle'" &&
+    "$command" != '"/usr/bin/asense --toggle"' ]]; then
+    ASENSE_SHORTCUT_STATUS="not-owned"
     return 0
   fi
   ASENSE_SHORTCUT_STATUS="failed"

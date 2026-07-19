@@ -71,7 +71,7 @@ installer_zip="$ROOT/${installer_name}.zip"
 source_zip="$ROOT/${source_name}.zip"
 installer_checksum="$installer_zip.sha256"
 source_checksum="$source_zip.sha256"
-checksums="$ROOT/asense-v${version}-${short_commit}-SHA256SUMS.txt"
+checksums="$ROOT/SHA256SUMS"
 temporary="$(mktemp -d)"
 trap 'rm -rf -- "$temporary"' EXIT INT TERM
 export CARGO_TARGET_DIR="$temporary/cargo-target"
@@ -91,14 +91,16 @@ install -d "$bundle/bin" "$bundle/assets" "$bundle/docs/screenshots" \
 install -m 0755 "$CARGO_TARGET_DIR/release/asense" "$bundle/bin/asense"
 install -m 0755 "$CARGO_TARGET_DIR/release/asensed" "$bundle/bin/asensed"
 install -m 0755 install.sh uninstall.sh "$bundle/"
-install -m 0644 README.md LICENSE Cargo.lock "$bundle/"
+install -m 0644 README.md DONATE.md LICENSE Cargo.lock "$bundle/"
 install -m 0644 assets/asense.desktop assets/asense.svg "$bundle/assets/"
 install -m 0644 docs/screenshots/asense-compact.png \
   docs/screenshots/asense-advanced.png "$bundle/docs/screenshots/"
+install -m 0644 docs/asense-bitcoin-qr.png docs/asense-paypal-qr.png "$bundle/docs/"
 install -m 0644 docs/RELEASING.md "$bundle/docs/"
 install -m 0644 kernel/LICENSE kernel/Makefile kernel/asense_rgb.c kernel/dkms.conf \
   "$bundle/kernel/"
-install -m 0644 packaging/90-asense-predator-key.hwdb \
+install -m 0644 packaging/71-asense-hid.rules \
+  packaging/90-asense-predator-key.hwdb \
   packaging/asense.service packaging/asense.socket.in packaging/common.sh \
   packaging/asense-system-sleep \
   "$bundle/packaging/"

@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "asense"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "dioxus",
  "dioxus-desktop",
@@ -74,6 +74,8 @@ dependencies = [
  "glib",
  "libc",
  "libloading 0.8.9",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

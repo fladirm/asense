@@ -1,29 +1,51 @@
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::control::{
-    CONTROL_PROTOCOL_VERSION, CONTROL_SOCKET, MAX_CONTROL_RESPONSE_LINE_BYTES, ProfileApplyReceipt,
-    ProfilePowerReceipt, encode_profile_apply_receipt,
+    CONTROL_PROTOCOL_VERSION, CONTROL_SOCKET, ControlCapabilities, ControlFanCapabilities,
+    ControlFanRpmChannel, MAX_CONTROL_COMMAND_BYTES, MAX_CONTROL_RESPONSE_PAYLOAD_BYTES,
+    ProfileApplyReceipt, ProfilePowerReceipt, encode_control_capabilities,
+    encode_profile_apply_receipt,
 };
-use crate::hardware::{AcerHardware, FanSetting, PlatformProfile};
-use crate::lighting::{EffectRequest, KeyboardLighting, ZonesRequest, encode_state};
+use crate::hardware::{
+    AcerHardware, FanBackend, FanMode as HardwareFanMode, FanSetting, PlatformProfile,
+};
+use crate::lighting::{
+    KeyboardLighting, LightingBackend, LightingController, LightingMode, LightingRequest,
+    LightingStateStatus, encode_state,
+};
 use crate::mutation_lock::MutationGuard;
+use crate::nvidia::discover_nvidia_pci_device;
 use crate::platform::{
     PlatformControls, RearLogoState, UsbCharging, encode_state as encode_platform_state,
 };
 use crate::telemetry::{
     MemoryHardwareInfo, encode_memory_hardware, read_privileged_memory_hardware,
 };
-use crate::tuning::ProfileController;
+use crate::tuning::{ProfileController, TuningState};
 
 static MEMORY_HARDWARE: OnceLock<MemoryHardwareInfo> = OnceLock::new();
-const MAX_COMMAND_BYTES: usize = 192;
-const MAX_RESPONSE_PAYLOAD_BYTES: usize = MAX_CONTROL_RESPONSE_LINE_BYTES - "ERR ".len();
+const ENEK_LIGHTING_CACHE: &str = "/var/lib/asense/enek5130.json";
+const NVIDIA_RESUME_PENDING: &str = "/run/asense-nvidia-reconcile";
+const NVIDIA_RECONCILE_RETRY: Duration = Duration::from_secs(30);
+const NVIDIA_RECONCILE_POLL: Duration = Duration::from_secs(1);
+const MAX_LIGHTING_CACHE_BYTES: u64 = 2048;
+const MAX_CACHED_LIGHTING_TARGETS: usize = 4;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CachedLighting {
+    schema: u8,
+    requests: Vec<LightingRequest>,
+}
 
 /// Incremental, allocation-bounded line decoder for the privileged protocol.
 ///
@@ -40,7 +62,7 @@ struct CommandDecoder {
 impl CommandDecoder {
     fn new() -> Self {
         Self {
-            pending: Vec::with_capacity(MAX_COMMAND_BYTES),
+            pending: Vec::with_capacity(MAX_CONTROL_COMMAND_BYTES),
         }
     }
 
@@ -84,7 +106,7 @@ impl CommandDecoder {
     }
 
     fn push(&mut self, bytes: &[u8]) -> bool {
-        let remaining = MAX_COMMAND_BYTES.saturating_sub(self.pending.len());
+        let remaining = MAX_CONTROL_COMMAND_BYTES.saturating_sub(self.pending.len());
         if bytes.len() > remaining {
             self.pending.clear();
             false
@@ -96,7 +118,7 @@ impl CommandDecoder {
 
     fn finish(&mut self) -> Result<String, String> {
         let bytes = std::mem::take(&mut self.pending);
-        self.pending = Vec::with_capacity(MAX_COMMAND_BYTES);
+        self.pending = Vec::with_capacity(MAX_CONTROL_COMMAND_BYTES);
         String::from_utf8(bytes).map_err(|_| "command must be valid UTF-8".to_string())
     }
 
@@ -108,8 +130,45 @@ impl CommandDecoder {
 
 pub fn run() -> Result<(), String> {
     ensure_root()?;
+    if let Err(error) = restore_cached_enek_lighting() {
+        eprintln!("asense ENEK lighting restore skipped: {error}");
+    }
     let listener = activated_listener()?;
+    let mut next_nvidia_reconciliation = Instant::now();
     loop {
+        if Path::new(NVIDIA_RESUME_PENDING).exists() && Instant::now() >= next_nvidia_reconciliation
+        {
+            let result = AcerHardware::discover()
+                .map_err(|error| error.to_string())
+                .and_then(|hardware| reconcile_pending_nvidia(&hardware));
+            next_nvidia_reconciliation = Instant::now()
+                + if result.is_ok() {
+                    NVIDIA_RECONCILE_POLL
+                } else {
+                    NVIDIA_RECONCILE_RETRY
+                };
+            if let Err(error) = result {
+                eprintln!("asense deferred NVIDIA reconciliation warning: {error}");
+            }
+        }
+        let mut ready = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `ready` points to one initialized pollfd and the listener
+        // remains open for the complete bounded wait.
+        let status = unsafe { libc::poll(&mut ready, 1, NVIDIA_RECONCILE_POLL.as_millis() as i32) };
+        if status == 0 {
+            continue;
+        }
+        if status < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("wait for client failed: {error}"));
+        }
         let (stream, _) = listener
             .accept()
             .map_err(|error| format!("accept failed: {error}"))?;
@@ -123,45 +182,29 @@ pub fn failsafe_auto() -> Result<(), String> {
     ensure_root()?;
     let _guard = MutationGuard::acquire()?;
     let hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
-    hardware
-        .apply_fan_setting(FanSetting::Automatic)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    if hardware.capabilities().fans.backend.is_some() {
+        hardware
+            .apply_fan_setting(FanSetting::Automatic)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    }
 }
 
-/// Privileged installation/runtime probe. Optional NVIDIA tuning is reported
-/// by the normal capability path and never hides the verified Acer controls.
+/// Privileged installation/runtime probe.
+///
+/// Installation verifies that discovery and protocol encoding work, but an
+/// absent optional controller is not an installation failure. The same
+/// capability snapshot is returned by `CAPS` after socket negotiation.
 pub fn probe() -> Result<(), String> {
     ensure_root()?;
     let hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
-    hardware
-        .read_fan_state()
-        .map_err(|error| error.to_string())?;
-    hardware
-        .current_profile()
-        .map_err(|error| error.to_string())?;
-    KeyboardLighting::discover()?.read()?;
-    PlatformControls::discover()?.read()?;
-    let profiles = ProfileController::discover().map_err(|error| error.to_string())?;
-    match profiles.state(&hardware) {
-        Ok(state) => println!(
-            "platform=verified profile={} gpu={:?} gpu_capability={}",
-            state.profile.as_sysfs(),
-            state.gpu_offsets,
-            if state.gpu_capability_error.is_some() {
-                "unavailable"
-            } else {
-                "available"
-            }
-        ),
-        Err(error) => println!(
-            "platform=verified profile={} gpu=Unavailable gpu_capability=unavailable diagnostic={error:?}",
-            hardware
-                .current_profile()
-                .map_err(|error| error.to_string())?
-                .as_sysfs()
-        ),
-    }
+    let capabilities = collect_control_capabilities(&hardware)?;
+    println!(
+        "{}",
+        encode_control_capabilities(&capabilities).map_err(String::from)?
+    );
     Ok(())
 }
 
@@ -175,17 +218,198 @@ pub fn resume_after_sleep() -> Result<(), String> {
     ensure_root()?;
     let _guard = MutationGuard::acquire()?;
     let hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
-    hardware
-        .apply_fan_setting(FanSetting::Automatic)
-        .map_err(|error| format!("post-resume fan safety: {error}"))?;
+    if hardware.capabilities().fans.backend.is_some() {
+        hardware
+            .apply_fan_setting(FanSetting::Automatic)
+            .map_err(|error| format!("post-resume fan safety: {error}"))?;
+    }
+    if hardware.is_reference_model() {
+        let pending = Path::new(NVIDIA_RESUME_PENDING);
+        // Record intent before trying NVML. Driver reloads and RTD3 transitions
+        // are normal around resume; a transient failure must not silently lose
+        // the PHN16-72 offset reconciliation.
+        write_pending_nvidia_reconciliation(pending)?;
+        if let Some(device) = discover_nvidia_pci_device(Path::new("/"))
+            && device.is_exact_oem_target()
+            && device.runtime_status.permits_live_nvml()
+        {
+            match reconcile_reference_profile(&hardware, "post-resume") {
+                Ok(()) => remove_pending_nvidia_reconciliation(pending)?,
+                Err(error) => {
+                    eprintln!("asense post-resume NVIDIA reconciliation deferred: {error}")
+                }
+            }
+        }
+    }
+    restore_cached_enek_lighting()
+        .map_err(|error| format!("post-resume ENEK lighting restore: {error}"))?;
+    Ok(())
+}
+
+fn reconcile_reference_profile(hardware: &AcerHardware, context: &str) -> Result<(), String> {
     let profile = hardware
         .current_profile()
-        .map_err(|error| format!("post-resume profile readback: {error}"))?;
-    ProfileController::discover()
+        .map_err(|error| format!("{context} profile readback: {error}"))?;
+    let state = ProfileController::discover()
         .map_err(|error| error.to_string())?
-        .set_profile(&hardware, profile)
-        .map_err(|error| format!("post-resume profile reconciliation: {error}"))?;
-    Ok(())
+        .set_profile(hardware, profile)
+        .map_err(|error| format!("{context} profile reconciliation: {error}"))?;
+    require_reconciled_nvidia(&state, context)
+}
+
+fn require_reconciled_nvidia(state: &TuningState, context: &str) -> Result<(), String> {
+    match state.gpu_capability_error.as_deref() {
+        None => Ok(()),
+        Some(error) => Err(format!(
+            "{context} NVIDIA offset reconciliation remains pending: {error}"
+        )),
+    }
+}
+
+fn write_pending_nvidia_reconciliation(path: &Path) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| format!("cannot defer NVIDIA resume reconciliation: {error}"))?;
+    file.write_all(b"pending\n")
+        .map_err(|error| format!("cannot record deferred NVIDIA reconciliation: {error}"))
+}
+
+fn remove_pending_nvidia_reconciliation(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot clear deferred NVIDIA reconciliation: {error}"
+        )),
+    }
+}
+
+fn finish_pending_nvidia_reconciliation(
+    path: &Path,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    result?;
+    remove_pending_nvidia_reconciliation(path)
+}
+
+fn reconcile_pending_nvidia(hardware: &AcerHardware) -> Result<(), String> {
+    let path = Path::new(NVIDIA_RESUME_PENDING);
+    if !path.exists() {
+        return Ok(());
+    }
+    if !hardware.is_reference_model() {
+        return remove_pending_nvidia_reconciliation(path);
+    }
+    let Some(device) = discover_nvidia_pci_device(Path::new("/")) else {
+        return Ok(());
+    };
+    if !device.is_exact_oem_target() || !device.runtime_status.permits_live_nvml() {
+        return Ok(());
+    }
+
+    let _guard = MutationGuard::acquire()?;
+    // Resume owns the same lock. It may have completed and removed the marker,
+    // or the GPU may have returned to RTD3 while this daemon was waiting.
+    if !path.exists() {
+        return Ok(());
+    }
+    let Some(device) = discover_nvidia_pci_device(Path::new("/")) else {
+        return Ok(());
+    };
+    if !device.is_exact_oem_target() || !device.runtime_status.permits_live_nvml() {
+        return Ok(());
+    }
+    finish_pending_nvidia_reconciliation(
+        path,
+        reconcile_reference_profile(hardware, "deferred post-resume"),
+    )
+}
+
+fn restore_cached_enek_lighting() -> Result<(), String> {
+    let requests = load_cached_lighting(Path::new(ENEK_LIGHTING_CACHE))?;
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let controllers = LightingController::discover_all();
+    let mut failures = Vec::new();
+    for request in requests {
+        if let Some(controller) = controllers.iter().find(|controller| {
+            controller.backend() == LightingBackend::Enek5130
+                && controller
+                    .devices()
+                    .iter()
+                    .any(|device| device.target == request.target)
+        }) && let Err(error) = controller.apply(&request)
+        {
+            failures.push(error);
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+fn load_cached_lighting(path: &Path) -> Result<Vec<LightingRequest>, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot open lighting cache: {error}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_LIGHTING_CACHE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read lighting cache: {error}"))?;
+    if bytes.len() as u64 > MAX_LIGHTING_CACHE_BYTES {
+        return Err("lighting cache is too large".to_string());
+    }
+    let cached: CachedLighting = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid lighting cache: {error}"))?;
+    if cached.schema != 1 {
+        return Err("unsupported lighting cache schema".to_string());
+    }
+    if cached.requests.len() > MAX_CACHED_LIGHTING_TARGETS {
+        return Err("lighting cache has too many targets".to_string());
+    }
+    Ok(cached.requests)
+}
+
+fn save_cached_lighting(request: &LightingRequest) -> Result<(), String> {
+    save_cached_lighting_at(Path::new(ENEK_LIGHTING_CACHE), request)
+}
+
+fn save_cached_lighting_at(path: &Path, request: &LightingRequest) -> Result<(), String> {
+    let mut requests = load_cached_lighting(path)?;
+    requests.retain(|cached| cached.target != request.target);
+    requests.push(request.clone());
+    let bytes = serde_json::to_vec(&CachedLighting {
+        schema: 1,
+        requests,
+    })
+    .map_err(|error| format!("cannot encode lighting cache: {error}"))?;
+    if bytes.len() as u64 > MAX_LIGHTING_CACHE_BYTES {
+        return Err("lighting cache is too large".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create lighting cache directory: {error}"))?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| format!("cannot open lighting cache for writing: {error}"))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("cannot write lighting cache: {error}"))
 }
 
 fn activated_listener() -> Result<UnixListener, String> {
@@ -206,8 +430,7 @@ fn activated_listener() -> Result<UnixListener, String> {
 
 fn serve_client(mut stream: UnixStream) -> Result<(), String> {
     authorize_peer(&stream)?;
-    let hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
-    let profiles = ProfileController::discover().map_err(|error| error.to_string())?;
+    let mut hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
         .map_err(|error| format!("set watchdog timeout: {error}"))?;
@@ -216,9 +439,17 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
     let mut decoder = CommandDecoder::new();
     let mut protocol = ProtocolSession::new();
     let mut fan_session = FanSessionState::Automatic;
+    let mut next_nvidia_reconciliation = Instant::now();
 
     let result = (|| -> Result<(), String> {
         loop {
+            if Instant::now() >= next_nvidia_reconciliation
+                && let Err(error) = reconcile_pending_nvidia(&hardware)
+            {
+                eprintln!("asense deferred NVIDIA reconciliation warning: {error}");
+                next_nvidia_reconciliation = Instant::now() + NVIDIA_RECONCILE_RETRY;
+            }
+            enforce_thermal_watchdog(&mut hardware, &mut fan_session)?;
             let command = match decoder.read(&mut reader) {
                 Ok(Some(command)) => command,
                 Ok(None) => break Ok(()),
@@ -228,15 +459,6 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                     ) =>
                 {
-                    if fan_session.needs_thermal_watchdog() && thermal_limit_reached(&hardware) {
-                        // Keep the session fail-safe before attempting the
-                        // emergency transition so every exit path retries Auto.
-                        fan_session = FanSessionState::EmergencyMaximum;
-                        let _mutation_guard = MutationGuard::acquire()?;
-                        hardware
-                            .apply_fan_setting(FanSetting::Maximum)
-                            .map_err(|error| format!("thermal failsafe failed: {error}"))?;
-                    }
                     continue;
                 }
                 Err(error) => break Err(format!("read failed: {error}")),
@@ -261,7 +483,7 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
                 }
                 ProtocolAction::Dispatch => {}
             }
-            let command_result = execute_command(&hardware, &profiles, command, &mut fan_session);
+            let command_result = execute_command(&mut hardware, command, &mut fan_session);
             let command_succeeded = command_result.is_ok();
             write_response(&mut stream, command_result)?;
             if command_succeeded {
@@ -393,8 +615,7 @@ fn authorize_peer(stream: &UnixStream) -> Result<(), String> {
 }
 
 fn execute_command(
-    hardware: &AcerHardware,
-    profiles: &ProfileController,
+    hardware: &mut AcerHardware,
     command: &str,
     fan_session: &mut FanSessionState,
 ) -> Result<String, String> {
@@ -408,11 +629,20 @@ fn execute_command(
         // inherit a previously persistent Maximum session state.
         fan_session.begin_mutation();
     }
+    if command_is_mutation(&fields) && !hardware.is_acer() {
+        return Err("Acer firmware mutations are unavailable on this system".to_string());
+    }
     let _mutation_guard = command_is_mutation(&fields)
         .then(MutationGuard::acquire)
         .transpose()?;
     match fields.as_slice() {
         ["PING"] => Ok("ready".to_string()),
+        ["CAPS"] => {
+            let refreshed = AcerHardware::discover().map_err(|error| error.to_string())?;
+            let capabilities = collect_control_capabilities(&refreshed)?;
+            *hardware = refreshed;
+            encode_control_capabilities(&capabilities).map_err(String::from)
+        }
         ["HARDWARE", "GET"] => Ok(encode_memory_hardware(
             MEMORY_HARDWARE.get_or_init(read_privileged_memory_hardware),
         )),
@@ -443,74 +673,140 @@ fn execute_command(
             Ok(format!("fan=manual cpu={cpu} gpu={gpu}"))
         }
         ["PROFILE", profile] => {
-            let profile =
-                PlatformProfile::from_sysfs(profile).map_err(|error| error.to_string())?;
-            let state = profiles
-                .set_profile(hardware, profile)
-                .map_err(|error| error.to_string())?;
-            let receipt = ProfileApplyReceipt {
-                firmware_profile: state.profile,
-                gpu_offsets: state.gpu_offsets,
-                gpu_pstate_count: state.gpu_pstate_count,
-                gpu_capability_available: state.gpu_capability_error.is_none(),
-                power: state.power.map(|power| ProfilePowerReceipt {
-                    enforced_limit_mw: power.enforced_limit_mw,
-                    maximum_limit_mw: power.maximum_limit_mw,
-                    clock_event_reasons: power.clock_event_reasons,
-                }),
+            if hardware.capabilities().fans.backend == Some(FanBackend::AcerGamingWmi) {
+                let state = hardware.read_fan_state().map_err(|error| {
+                    format!("cannot reconcile Gaming-WMI fan mode before profile write: {error}")
+                })?;
+                if state.cpu.mode != Some(HardwareFanMode::Automatic)
+                    || state.gpu.mode != Some(HardwareFanMode::Automatic)
+                {
+                    fan_session.begin_mutation();
+                    hardware
+                        .apply_fan_setting(FanSetting::Automatic)
+                        .map_err(|error| error.to_string())?;
+                    fan_session.automatic_readback_confirmed();
+                }
+            }
+            let receipt = if hardware.is_reference_model() {
+                let profile =
+                    PlatformProfile::from_sysfs(profile).map_err(|error| error.to_string())?;
+                // Opening NVML is reserved for this explicit profile
+                // transaction. Merely connecting the GUI to the daemon must
+                // not wake a hybrid dGPU, and the controller is dropped when
+                // the command finishes.
+                let state = ProfileController::discover()
+                    .map_err(|error| error.to_string())?
+                    .set_profile(hardware, profile)
+                    .map_err(|error| error.to_string())?;
+                if state.gpu_capability_error.is_none()
+                    && let Err(error) =
+                        remove_pending_nvidia_reconciliation(Path::new(NVIDIA_RESUME_PENDING))
+                {
+                    // The profile and offsets are already verified. A stale
+                    // marker cleanup failure must not turn success into ERR.
+                    eprintln!("asense NVIDIA reconciliation marker warning: {error}");
+                }
+                ProfileApplyReceipt {
+                    firmware_profile: state.profile.as_sysfs().to_string(),
+                    gpu_offsets: state.gpu_offsets,
+                    gpu_pstate_count: state.gpu_pstate_count,
+                    gpu_capability_available: state.gpu_capability_error.is_none(),
+                    power: state.power.map(|power| ProfilePowerReceipt {
+                        enforced_limit_mw: power.enforced_limit_mw,
+                        maximum_limit_mw: power.maximum_limit_mw,
+                        clock_event_reasons: power.clock_event_reasons,
+                    }),
+                }
+            } else {
+                hardware
+                    .set_profile_raw(profile)
+                    .map_err(|error| error.to_string())?;
+                ProfileApplyReceipt {
+                    firmware_profile: hardware
+                        .current_profile_raw()
+                        .map_err(|error| error.to_string())?,
+                    gpu_offsets: crate::tuning::GpuOffsetState::Unavailable,
+                    gpu_pstate_count: 0,
+                    gpu_capability_available: false,
+                    power: None,
+                }
             };
+            if hardware.capabilities().fans.backend == Some(FanBackend::AcerGamingWmi) {
+                let (receipt, warning) = preserve_verified_profile_after_fan_refresh(
+                    receipt,
+                    hardware.read_fan_state().map(|_| ()),
+                );
+                if let Some(warning) = warning {
+                    eprintln!("{warning}");
+                }
+                return Ok(encode_profile_apply_receipt(&receipt));
+            }
             Ok(encode_profile_apply_receipt(&receipt))
         }
         ["RGB", "GET"] => {
             let lighting = KeyboardLighting::discover()?;
             lighting.read().map(encode_state)
         }
-        ["RGB", "POWER", value] => {
-            let enabled = match *value {
-                "ON" => true,
-                "OFF" => false,
-                _ => return Err("keyboard power must be ON or OFF".to_string()),
-            };
-            let lighting = KeyboardLighting::discover()?;
-            lighting.set_power(enabled).map(encode_state)
-        }
         [
-            "RGB",
-            "EFFECT",
+            "LIGHTING",
+            "APPLY",
+            device_id,
             mode,
-            speed,
             brightness,
-            direction,
-            red,
-            green,
-            blue,
+            speed,
+            color,
+            zones,
         ] => {
-            let lighting = KeyboardLighting::discover()?;
-            let request = EffectRequest {
-                mode: parse_u8(mode, "effect mode")?,
-                speed: parse_u8(speed, "effect speed")?,
-                brightness: parse_u8(brightness, "brightness")?,
-                direction: parse_u8(direction, "effect direction")?,
-                color: [
-                    parse_u8(red, "red")?,
-                    parse_u8(green, "green")?,
-                    parse_u8(blue, "blue")?,
-                ],
-            };
-            lighting.set_effect(request).map(encode_state)
+            let mode = parse_lighting_mode(mode)?;
+            let color = parse_color(color)?;
+            let zone_colors = parse_zone_colors(zones)?;
+            let brightness = parse_u8(brightness, "lighting brightness")?;
+            let speed = parse_u8(speed, "lighting speed")?;
+            if brightness > 100 || speed > 9 {
+                return Err(
+                    "lighting brightness must be 0..=100 and speed must be 0..=9".to_string(),
+                );
+            }
+
+            for controller in LightingController::discover_all() {
+                if let Some(device) = controller
+                    .devices()
+                    .into_iter()
+                    .find(|device| device.id == *device_id)
+                {
+                    let request = LightingRequest {
+                        target: device.target,
+                        mode,
+                        brightness,
+                        speed,
+                        color,
+                        zone_colors,
+                    };
+                    let status = controller.apply(&request)?;
+                    if controller.backend() == LightingBackend::Enek5130
+                        && let Err(error) = save_cached_lighting(&request)
+                    {
+                        eprintln!("asense ENEK lighting cache warning: {error}");
+                    }
+                    return Ok(encode_lighting_status(status));
+                }
+            }
+            Err("lighting device is unavailable".to_string())
         }
-        ["RGB", "ZONES", zone1, zone2, zone3, zone4, brightness] => {
-            let lighting = KeyboardLighting::discover()?;
-            let request = ZonesRequest {
-                zones: [
-                    parse_color(zone1)?,
-                    parse_color(zone2)?,
-                    parse_color(zone3)?,
-                    parse_color(zone4)?,
-                ],
-                brightness: parse_u8(brightness, "brightness")?,
-            };
-            lighting.set_zones(request).map(encode_state)
+        ["LIGHTING", "POWER", device_id, value] => {
+            let enabled = parse_on_off(value, "lighting power")?;
+            for controller in LightingController::discover_all() {
+                if let Some(device) = controller
+                    .devices()
+                    .into_iter()
+                    .find(|device| device.id == *device_id)
+                {
+                    return controller
+                        .set_power(device.target, enabled)
+                        .map(encode_lighting_status);
+                }
+            }
+            Err("lighting device is unavailable".to_string())
         }
         ["PLATFORM", "GET"] => {
             let controls = PlatformControls::discover()?;
@@ -568,6 +864,63 @@ fn execute_command(
         }
         _ => Err("unsupported command".to_string()),
     }
+}
+
+fn preserve_verified_profile_after_fan_refresh<T, E>(
+    receipt: T,
+    refresh: Result<(), E>,
+) -> (T, Option<String>)
+where
+    E: std::fmt::Display,
+{
+    let warning = refresh
+        .err()
+        .map(|error| format!("asense post-profile Gaming-WMI fan refresh warning: {error}"));
+    (receipt, warning)
+}
+
+fn collect_control_capabilities(hardware: &AcerHardware) -> Result<ControlCapabilities, String> {
+    let discovered = hardware.capabilities();
+    let lighting = if hardware.is_acer() {
+        LightingController::discover_all()
+            .into_iter()
+            .flat_map(|controller| controller.devices())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let platform = if hardware.is_acer() {
+        PlatformControls::discover()
+            .map(|controls| controls.capabilities())
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+
+    Ok(ControlCapabilities {
+        vendor: discovered.vendor,
+        product: discovered.product,
+        reference_model: discovered.reference_model,
+        profiles: discovered.profiles,
+        fans: ControlFanCapabilities {
+            backend: discovered.fans.backend,
+            rpm_channels: discovered
+                .fans
+                .rpm_channels
+                .into_iter()
+                .map(|channel| ControlFanRpmChannel {
+                    index: channel.index,
+                    label: channel.label,
+                    rpm: channel.rpm,
+                })
+                .collect(),
+            auto: discovered.fans.auto,
+            manual: discovered.fans.manual,
+            maximum: discovered.fans.maximum,
+        },
+        lighting,
+        platform,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -630,7 +983,51 @@ fn command_is_mutation(fields: &[&str]) -> bool {
     match fields {
         ["FAN", ..] | ["PROFILE", ..] => true,
         ["RGB", operation, ..] | ["PLATFORM", operation, ..] => *operation != "GET",
+        ["LIGHTING", "APPLY" | "POWER", ..] => true,
         _ => false,
+    }
+}
+
+fn parse_lighting_mode(value: &str) -> Result<LightingMode, String> {
+    match value {
+        "OFF" => Ok(LightingMode::Off),
+        "STATIC" => Ok(LightingMode::Static),
+        "BREATHING" => Ok(LightingMode::Breathing),
+        "NEON" => Ok(LightingMode::Neon),
+        _ => Err("lighting mode must be OFF, STATIC, BREATHING or NEON".to_string()),
+    }
+}
+
+fn parse_zone_colors(value: &str) -> Result<Vec<[u8; 3]>, String> {
+    if value == "-" {
+        return Ok(Vec::new());
+    }
+    let colors = value.split(',').collect::<Vec<_>>();
+    if colors.is_empty() || colors.len() > 16 {
+        return Err("lighting request must contain 1..=16 zone colors".to_string());
+    }
+    colors.into_iter().map(parse_color).collect()
+}
+
+fn encode_lighting_status(status: LightingStateStatus) -> String {
+    match status {
+        LightingStateStatus::Firmware(state) => encode_state(state),
+        LightingStateStatus::Unknown => "state=unknown".to_string(),
+        LightingStateStatus::LastApplied(request) => format!(
+            "state=last-applied mode={} brightness={} speed={} color={:02x}{:02x}{:02x} zones={}",
+            match request.mode {
+                LightingMode::Off => "off",
+                LightingMode::Static => "static",
+                LightingMode::Breathing => "breathing",
+                LightingMode::Neon => "neon",
+            },
+            request.brightness,
+            request.speed,
+            request.color[0],
+            request.color[1],
+            request.color[2],
+            request.zone_colors.len()
+        ),
     }
 }
 
@@ -669,16 +1066,31 @@ fn parse_manual_percent(value: &str) -> Result<u8, String> {
     Ok(value)
 }
 
-fn thermal_limit_reached(hardware: &AcerHardware) -> bool {
-    let cpu = hardware
-        .read_acer_temp_millidegrees(1)
-        .ok()
-        .is_some_and(|value| value >= 92_000);
-    let gpu = hardware
-        .read_acer_temp_millidegrees(2)
-        .ok()
-        .is_some_and(|value| value >= 84_000);
-    cpu || gpu
+fn enforce_thermal_watchdog(
+    hardware: &mut AcerHardware,
+    fan_session: &mut FanSessionState,
+) -> Result<(), String> {
+    if !fan_session.needs_thermal_watchdog() {
+        return Ok(());
+    }
+    let cpu = hardware.read_acer_temp_millidegrees(1);
+    let gpu = hardware.read_acer_temp_millidegrees(2);
+    let unsafe_or_unavailable = cpu.is_err()
+        || gpu.is_err()
+        || cpu.is_ok_and(|value| value >= 92_000)
+        || gpu.is_ok_and(|value| value >= 84_000);
+    if !unsafe_or_unavailable {
+        return Ok(());
+    }
+
+    // Set the fail-safe state before writing so disconnect cleanup still
+    // retries Auto if the emergency Maximum transition itself fails.
+    *fan_session = FanSessionState::EmergencyMaximum;
+    let _mutation_guard = MutationGuard::acquire()?;
+    hardware
+        .apply_fan_setting(FanSetting::Maximum)
+        .map(|_| ())
+        .map_err(|error| format!("thermal failsafe failed: {error}"))
 }
 
 fn write_response(stream: &mut UnixStream, result: Result<String, String>) -> Result<(), String> {
@@ -695,14 +1107,14 @@ fn write_response(stream: &mut UnixStream, result: Result<String, String>) -> Re
 }
 
 fn sanitize_response_payload(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len().min(MAX_RESPONSE_PAYLOAD_BYTES));
+    let mut sanitized = String::with_capacity(value.len().min(MAX_CONTROL_RESPONSE_PAYLOAD_BYTES));
     for character in value.chars() {
         let character = match character {
             '\r' | '\n' => ' ',
             value if value.is_control() => '?',
             value => value,
         };
-        if sanitized.len() + character.len_utf8() > MAX_RESPONSE_PAYLOAD_BYTES {
+        if sanitized.len() + character.len_utf8() > MAX_CONTROL_RESPONSE_PAYLOAD_BYTES {
             break;
         }
         sanitized.push(character);
@@ -728,13 +1140,111 @@ fn ensure_root() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandDecoder, FanSessionState, MAX_COMMAND_BYTES, MAX_RESPONSE_PAYLOAD_BYTES,
-        ProtocolAction, ProtocolSession, command_is_mutation, parse_color, parse_manual_percent,
-        parse_on_off, protocol_handshake, sanitize_response_payload, write_response,
+        CommandDecoder, FanSessionState, ProtocolAction, ProtocolSession, command_is_mutation,
+        finish_pending_nvidia_reconciliation, load_cached_lighting, parse_color,
+        parse_lighting_mode, parse_manual_percent, parse_on_off, parse_zone_colors,
+        preserve_verified_profile_after_fan_refresh, protocol_handshake,
+        remove_pending_nvidia_reconciliation, require_reconciled_nvidia, sanitize_response_payload,
+        save_cached_lighting_at, write_pending_nvidia_reconciliation, write_response,
     };
-    use crate::control::MAX_CONTROL_RESPONSE_LINE_BYTES;
+    use crate::control::{
+        MAX_CONTROL_COMMAND_BYTES, MAX_CONTROL_RESPONSE_LINE_BYTES,
+        MAX_CONTROL_RESPONSE_PAYLOAD_BYTES,
+    };
+    use crate::hardware::PlatformProfile;
+    use crate::lighting::{LightingMode, LightingRequest, LightingTarget};
+    use crate::tuning::{GpuOffsetState, TuningState};
     use std::io::{BufRead, BufReader, Cursor};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
+
+    fn cached_request(target: LightingTarget, color: [u8; 3]) -> LightingRequest {
+        LightingRequest {
+            target,
+            mode: LightingMode::Static,
+            brightness: 70,
+            speed: 0,
+            color,
+            zone_colors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn enek_cache_keeps_one_latest_request_per_target() {
+        let path = std::env::temp_dir().join(format!(
+            "asense-enek-cache-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        let keyboard = cached_request(LightingTarget::Keyboard, [1, 2, 3]);
+        let logo = cached_request(LightingTarget::CoverLogo, [4, 5, 6]);
+        let updated_keyboard = cached_request(LightingTarget::Keyboard, [7, 8, 9]);
+
+        save_cached_lighting_at(&path, &keyboard).unwrap();
+        save_cached_lighting_at(&path, &logo).unwrap();
+        save_cached_lighting_at(&path, &updated_keyboard).unwrap();
+
+        let cached = load_cached_lighting(&path).unwrap();
+        assert_eq!(cached, vec![logo, updated_keyboard]);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deferred_nvidia_reconciliation_marker_is_private_and_removable() {
+        let path = std::env::temp_dir().join(format!(
+            "asense-nvidia-reconcile-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        write_pending_nvidia_reconciliation(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "pending\n");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        remove_pending_nvidia_reconciliation(&path).unwrap();
+        assert!(!path.exists());
+        remove_pending_nvidia_reconciliation(&path).unwrap();
+    }
+
+    #[test]
+    fn deferred_nvidia_reconciliation_requires_gpu_proof_and_keeps_failed_intent() {
+        let path = std::env::temp_dir().join(format!(
+            "asense-nvidia-proof-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        write_pending_nvidia_reconciliation(&path).unwrap();
+
+        let mut state = TuningState {
+            profile: PlatformProfile::Balanced,
+            gpu_offsets: GpuOffsetState::Reset,
+            gpu_pstate_count: 4,
+            gpu_capability_error: None,
+            power: None,
+            power_error: None,
+        };
+        assert!(require_reconciled_nvidia(&state, "test").is_ok());
+        state.gpu_capability_error = Some("NVML unavailable".to_string());
+        let failed = require_reconciled_nvidia(&state, "test");
+        assert!(
+            failed
+                .as_ref()
+                .is_err_and(|error| error.contains("remains pending"))
+        );
+        assert!(finish_pending_nvidia_reconciliation(&path, failed).is_err());
+        assert!(path.exists());
+
+        finish_pending_nvidia_reconciliation(&path, Ok(())).unwrap();
+        assert!(!path.exists());
+    }
 
     #[test]
     fn percent_is_fail_closed() {
@@ -761,6 +1271,19 @@ mod tests {
         assert!(!parse_on_off("OFF", "test").unwrap());
         assert!(parse_on_off("on", "test").is_err());
         assert!(parse_on_off("1", "test").is_err());
+    }
+
+    #[test]
+    fn post_profile_fan_refresh_failure_preserves_verified_success() {
+        let (receipt, warning) = preserve_verified_profile_after_fan_refresh(
+            "verified-profile-receipt",
+            Err("fan refresh failed"),
+        );
+        assert_eq!(receipt, "verified-profile-receipt");
+        assert_eq!(
+            warning.as_deref(),
+            Some("asense post-profile Gaming-WMI fan refresh warning: fan refresh failed")
+        );
     }
 
     #[test]
@@ -813,11 +1336,11 @@ mod tests {
     fn response_payload_is_single_line_and_bounded() {
         let payload = format!(
             "first\nsecond\r{}",
-            "x".repeat(MAX_RESPONSE_PAYLOAD_BYTES * 2)
+            "x".repeat(MAX_CONTROL_RESPONSE_PAYLOAD_BYTES * 2)
         );
         let sanitized = sanitize_response_payload(&payload);
         assert!(!sanitized.contains(['\n', '\r']));
-        assert!(sanitized.len() <= MAX_RESPONSE_PAYLOAD_BYTES);
+        assert!(sanitized.len() <= MAX_CONTROL_RESPONSE_PAYLOAD_BYTES);
         assert!(sanitized.starts_with("first second "));
     }
 
@@ -838,12 +1361,12 @@ mod tests {
 
     #[test]
     fn protocol_handshake_is_versioned_and_exact() {
-        let response = protocol_handshake(&["HELLO", "1"])
+        let response = protocol_handshake(&["HELLO", "2"])
             .expect("HELLO is a protocol command")
             .unwrap();
-        assert!(response.starts_with("protocol=1 daemon="));
+        assert!(response.starts_with("protocol=2 daemon="));
         assert!(
-            protocol_handshake(&["HELLO", "2"])
+            protocol_handshake(&["HELLO", "1"])
                 .unwrap()
                 .unwrap_err()
                 .contains("unsupported protocol version")
@@ -858,19 +1381,19 @@ mod tests {
         assert!(matches!(
             ProtocolSession::new().accept("PING"),
             ProtocolAction::HandshakeRejected(error)
-                if error.contains("expected HELLO 1")
+                if error.contains("expected HELLO 2")
         ));
         assert!(matches!(
-            ProtocolSession::new().accept("HELLO 2"),
+            ProtocolSession::new().accept("HELLO 1"),
             ProtocolAction::HandshakeRejected(error)
                 if error.contains("unsupported protocol version")
         ));
 
         let mut session = ProtocolSession::new();
         assert!(matches!(
-            session.accept("HELLO 1"),
+            session.accept("HELLO 2"),
             ProtocolAction::HandshakeAccepted(receipt)
-                if receipt.starts_with("protocol=1 daemon=")
+                if receipt.starts_with("protocol=2 daemon=")
         ));
         assert!(matches!(
             session.accept("PROFILE performance"),
@@ -887,12 +1410,12 @@ mod tests {
 
         let error = decoder.read(&mut reader).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(decoder.retained_bytes() <= MAX_COMMAND_BYTES);
+        assert!(decoder.retained_bytes() <= MAX_CONTROL_COMMAND_BYTES);
     }
 
     #[test]
     fn privileged_protocol_accepts_exact_limit_and_rejects_invalid_utf8() {
-        let exact = "a".repeat(MAX_COMMAND_BYTES);
+        let exact = "a".repeat(MAX_CONTROL_COMMAND_BYTES);
         let mut bytes = exact.as_bytes().to_vec();
         bytes.extend_from_slice(b"\n\xff\n");
         let mut reader = BufReader::with_capacity(11, Cursor::new(bytes));
@@ -918,12 +1441,12 @@ mod tests {
 
     #[test]
     fn privileged_protocol_accepts_fragmented_newline_terminated_frames() {
-        let mut reader = BufReader::with_capacity(3, Cursor::new(b"HELLO 1\nPING\n"));
+        let mut reader = BufReader::with_capacity(3, Cursor::new(b"HELLO 2\nPING\n"));
         let mut decoder = CommandDecoder::new();
 
         assert_eq!(
             decoder.read(&mut reader).unwrap().unwrap().unwrap(),
-            "HELLO 1"
+            "HELLO 2"
         );
         assert_eq!(decoder.read(&mut reader).unwrap().unwrap().unwrap(), "PING");
         assert!(decoder.read(&mut reader).unwrap().is_none());
@@ -937,6 +1460,23 @@ mod tests {
         assert!(command_is_mutation(&["FAN", "AUTO"]));
         assert!(command_is_mutation(&["PROFILE", "performance"]));
         assert!(command_is_mutation(&["RGB", "POWER", "ON"]));
+        assert!(command_is_mutation(&["LIGHTING", "APPLY", "enek-keyboard"]));
+        assert!(command_is_mutation(&[
+            "LIGHTING",
+            "POWER",
+            "zoned-wmi-keyboard",
+            "OFF"
+        ]));
         assert!(command_is_mutation(&["PLATFORM", "BATTERY_LIMIT", "ON"]));
+    }
+
+    #[test]
+    fn typed_lighting_values_are_bounded() {
+        assert!(parse_lighting_mode("STATIC").is_ok());
+        assert!(parse_lighting_mode("WAVE").is_err());
+        assert!(parse_zone_colors("-").unwrap().is_empty());
+        assert_eq!(parse_zone_colors("001122,aabbcc").unwrap().len(), 2);
+        assert!(parse_zone_colors("001122,invalid").is_err());
+        assert!(parse_zone_colors(&vec!["000000"; 17].join(",")).is_err());
     }
 }

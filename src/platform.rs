@@ -2,7 +2,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const WMI_GUID: &str = "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56";
+const GAMING_WMI_GUID: &str = "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56";
+const BATTERY_WMI_GUID: &str = "79772EC5-04B1-4BFD-843C-61E7F77B6CC9";
+const APGE_WMI_GUID: &str = "61EF69EA-865C-4BC3-A502-A0DEBA0CB531";
 const ATTRIBUTE_COUNT: usize = 8;
 
 pub const READ_ERROR_BATTERY_LIMIT: u8 = 1 << 0;
@@ -76,23 +78,63 @@ pub struct PlatformState {
 }
 
 pub struct PlatformControls {
-    base: PathBuf,
+    gaming: Option<PathBuf>,
+    battery: Option<PathBuf>,
+    apge: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformCapabilities {
+    pub battery_limit: bool,
+    pub battery_calibration: bool,
+    pub usb_off_charging: bool,
+    pub keyboard_timeout: bool,
+    pub boot_sound: bool,
+    pub lcd_override: bool,
+    pub rear_logo: bool,
 }
 
 impl PlatformControls {
     pub fn discover() -> Result<Self, String> {
-        let base = Path::new("/sys/bus/wmi/devices")
-            .join(WMI_GUID)
-            .join("asense_rgb");
-        if !base.is_dir() {
+        Self::discover_at(Path::new("/sys/bus/wmi/devices"))
+    }
+
+    pub(crate) fn discover_at(wmi_root: &Path) -> Result<Self, String> {
+        let gaming = find_wmi_group(wmi_root, GAMING_WMI_GUID, "asense_rgb");
+        let battery = find_wmi_group(wmi_root, BATTERY_WMI_GUID, "asense_battery")
+            .or_else(|| legacy_group_with(wmi_root, GAMING_WMI_GUID, "battery_limit"));
+        let apge = find_wmi_group(wmi_root, APGE_WMI_GUID, "asense_apge")
+            .or_else(|| legacy_group_with(wmi_root, GAMING_WMI_GUID, "usb_charging"));
+        if gaming.is_none() && battery.is_none() && apge.is_none() {
             return Err("ASense platform kernel transport is unavailable".to_string());
         }
-        Ok(Self { base })
+        Ok(Self {
+            gaming,
+            battery,
+            apge,
+        })
     }
 
     #[cfg(test)]
     fn at(base: PathBuf) -> Self {
-        Self { base }
+        Self {
+            gaming: Some(base.clone()),
+            battery: Some(base.clone()),
+            apge: Some(base),
+        }
+    }
+
+    pub fn capabilities(&self) -> PlatformCapabilities {
+        PlatformCapabilities {
+            battery_limit: self.attribute_path("battery_limit").is_some(),
+            battery_calibration: self.attribute_path("battery_calibration").is_some(),
+            usb_off_charging: self.attribute_path("usb_charging").is_some(),
+            keyboard_timeout: self.attribute_path("keyboard_timeout").is_some(),
+            boot_sound: self.attribute_path("boot_sound").is_some(),
+            lcd_override: self.attribute_path("lcd_override").is_some(),
+            rear_logo: self.attribute_path("rear_logo").is_some(),
+        }
     }
 
     pub fn read(&self) -> Result<PlatformState, String> {
@@ -210,19 +252,14 @@ impl PlatformControls {
     }
 
     fn require_attribute(&self, name: &str, label: &str) -> Result<PathBuf, String> {
-        let path = self.base.join(name);
-        if path.is_file() {
-            Ok(path)
-        } else {
-            Err(format!("{label} is not supported by this firmware"))
-        }
+        self.attribute_path(name)
+            .ok_or_else(|| format!("{label} is not supported by this firmware"))
     }
 
     fn read_optional_bool(&self, name: &str, label: &str) -> Result<Option<bool>, String> {
-        let path = self.base.join(name);
-        if !path.is_file() {
+        let Some(path) = self.attribute_path(name) else {
             return Ok(None);
-        }
+        };
         let value =
             fs::read_to_string(path).map_err(|error| format!("cannot read {label}: {error}"))?;
         parse_bool(value.trim())
@@ -231,10 +268,9 @@ impl PlatformControls {
     }
 
     fn read_optional_usb(&self) -> Result<Option<UsbCharging>, String> {
-        let path = self.base.join("usb_charging");
-        if !path.is_file() {
+        let Some(path) = self.attribute_path("usb_charging") else {
             return Ok(None);
-        }
+        };
         let value = fs::read_to_string(path)
             .map_err(|error| format!("cannot read USB charging: {error}"))?;
         let threshold = value
@@ -245,14 +281,79 @@ impl PlatformControls {
     }
 
     fn read_optional_logo(&self) -> Result<Option<RearLogoState>, String> {
-        let path = self.base.join("rear_logo");
-        if !path.is_file() {
+        let Some(path) = self.attribute_path("rear_logo") else {
             return Ok(None);
-        }
+        };
         let value =
             fs::read_to_string(path).map_err(|error| format!("cannot read rear logo: {error}"))?;
         parse_logo(value.trim()).map(Some)
     }
+
+    fn attribute_path(&self, name: &str) -> Option<PathBuf> {
+        let preferred = match name {
+            "battery_limit" | "battery_calibration" => self.battery.as_ref(),
+            "usb_charging" | "keyboard_timeout" => self.apge.as_ref(),
+            _ => self.gaming.as_ref(),
+        };
+        preferred
+            .map(|base| base.join(name))
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                self.gaming
+                    .as_ref()
+                    .map(|base| base.join(name))
+                    .filter(|path| path.is_file())
+            })
+    }
+}
+
+fn legacy_group_with(wmi_root: &Path, guid: &str, attribute: &str) -> Option<PathBuf> {
+    find_wmi_group(wmi_root, guid, "asense_rgb").filter(|base| base.join(attribute).is_file())
+}
+
+pub(crate) fn find_wmi_device(wmi_root: &Path, guid: &str) -> Option<PathBuf> {
+    matching_wmi_devices(wmi_root, guid).into_iter().next()
+}
+
+pub(crate) fn find_wmi_group(wmi_root: &Path, guid: &str, group: &str) -> Option<PathBuf> {
+    matching_wmi_devices(wmi_root, guid)
+        .into_iter()
+        .map(|device| device.join(group))
+        .find(|path| path.is_dir())
+}
+
+fn matching_wmi_devices(wmi_root: &Path, guid: &str) -> Vec<PathBuf> {
+    let mut matches = fs::read_dir(wmi_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| wmi_name_matches(name, guid))
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
+}
+
+fn wmi_name_matches(name: &str, guid: &str) -> bool {
+    if name.eq_ignore_ascii_case(guid) {
+        return true;
+    }
+    let Some(prefix) = name.get(..guid.len()) else {
+        return false;
+    };
+    let Some(suffix) = name.get(guid.len()..) else {
+        return false;
+    };
+    let Some(instance) = suffix.strip_prefix('-') else {
+        return false;
+    };
+    prefix.eq_ignore_ascii_case(guid)
+        && !instance.is_empty()
+        && instance.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn isolate_getter_failure<T>(
@@ -522,6 +623,75 @@ mod tests {
         assert_eq!(state.usb_charging, None);
         assert_eq!(state.rear_logo.unwrap().color, [0xa0, 0xb1, 0xc2]);
         assert_eq!(state.read_error_mask, READ_ERROR_USB_CHARGING);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn battery_and_apge_groups_are_discovered_without_rgb() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "asense-platform-groups-{}-{unique}",
+            std::process::id()
+        ));
+        // The first matching WMI instance need not own every optional group.
+        fs::create_dir_all(root.join(super::BATTERY_WMI_GUID)).unwrap();
+        let battery = root
+            .join(format!(
+                "{}-00",
+                super::BATTERY_WMI_GUID.to_ascii_lowercase()
+            ))
+            .join("asense_battery");
+        let apge = root
+            .join(format!("{}-2", super::APGE_WMI_GUID.to_ascii_lowercase()))
+            .join("asense_apge");
+        fs::create_dir_all(&battery).unwrap();
+        fs::create_dir_all(&apge).unwrap();
+        fs::write(battery.join("battery_limit"), "1\n").unwrap();
+        fs::write(apge.join("usb_charging"), "20\n").unwrap();
+
+        let controls = PlatformControls::discover_at(&root).unwrap();
+        let capabilities = controls.capabilities();
+        assert!(capabilities.battery_limit);
+        assert!(capabilities.usb_off_charging);
+        assert!(!capabilities.rear_logo);
+        let state = controls.read().unwrap();
+        assert_eq!(state.battery_limit, Some(true));
+        assert_eq!(state.usb_charging, Some(UsbCharging::StopAt20Percent));
+        assert_eq!(state.rear_logo, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_endpoint_failure_does_not_hide_another_group() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "asense-platform-isolation-{}-{unique}",
+            std::process::id()
+        ));
+        let battery = root
+            .join(format!("{}-00", super::BATTERY_WMI_GUID))
+            .join("asense_battery");
+        let apge = root
+            .join(format!("{}-00", super::APGE_WMI_GUID))
+            .join("asense_apge");
+        fs::create_dir_all(&battery).unwrap();
+        fs::create_dir_all(&apge).unwrap();
+        fs::write(battery.join("battery_limit"), "invalid\n").unwrap();
+        fs::write(apge.join("keyboard_timeout"), "1\n").unwrap();
+
+        let state = PlatformControls::discover_at(&root)
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(state.battery_limit, None);
+        assert_eq!(state.keyboard_timeout, Some(true));
+        assert_eq!(state.read_error_mask, READ_ERROR_BATTERY_LIMIT);
         fs::remove_dir_all(root).unwrap();
     }
 }

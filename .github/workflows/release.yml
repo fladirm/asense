@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +12,7 @@ permissions:
 jobs:
   release:
     name: Build Ubuntu 26.04 release
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
@@ -36,17 +38,30 @@ jobs:
 
       - name: Build release assets
         env:
-          ASENSE_RELEASE_TAG: ${{ github.ref_name }}
+          ASENSE_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || '' }}
         run: scripts/package-release.sh
 
+      - name: Upload release-candidate assets
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: asense-v0.2.0-rc-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            asense-v*.zip
+            asense-v*.zip.sha256
+            SHA256SUMS
+
       - name: Publish GitHub Release assets
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
-            --title "ASense $GITHUB_REF_NAME" \
-            --generate-notes \
+            --title "ASense v0.2.0 — Multi-model Acer Linux support" \
+            --notes-file docs/RELEASE_NOTES_v0.2.0.md \
             asense-v*.zip \
             asense-v*.zip.sha256 \
-            asense-v*-SHA256SUMS.txt
+            SHA256SUMS

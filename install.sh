@@ -31,9 +31,18 @@ DKMS_CONF="$ROOT/kernel/dkms.conf"
 DKMS_NAME="$(asense_dkms_value PACKAGE_NAME "$DKMS_CONF")"
 DKMS_VERSION="$(asense_dkms_value PACKAGE_VERSION "$DKMS_CONF")"
 DKMS_SOURCE="/usr/src/$DKMS_NAME-$DKMS_VERSION"
-RGB_GUID="7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56"
-RGB_SYSFS="/sys/bus/wmi/devices/$RGB_GUID/asense_rgb"
+GAMING_GUID="7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56"
+BATTERY_GUID="79772EC5-04B1-4BFD-843C-61E7F77B6CC9"
+APGE_GUID="61EF69EA-865C-4BC3-A502-A0DEBA0CB531"
 KERNEL_RELEASE="$(uname -r)"
+SYSTEM_VENDOR="$(sed -n '1p' /sys/class/dmi/id/sys_vendor 2>/dev/null || true)"
+SYSTEM_PRODUCT="$(sed -n '1p' /sys/class/dmi/id/product_name 2>/dev/null || true)"
+IS_ACER=0
+IS_REFERENCE_MODEL=0
+HAS_KNOWN_WMI=0
+HAS_BINDABLE_WMI=0
+INSTALL_DKMS=0
+WMI_CONFLICTS=()
 KERNEL_RELEASES=()
 OLD_DKMS_VERSIONS=()
 OLD_DKMS_REGISTERED_VERSIONS=()
@@ -65,6 +74,7 @@ PACKAGE_PATHS=(
   /etc/systemd/system/asense.service
   /etc/systemd/system/asense.socket
   /usr/lib/systemd/system-sleep/asense
+  /etc/udev/rules.d/71-asense-hid.rules
   /etc/udev/hwdb.d/90-asense-predator-key.hwdb
   /usr/share/applications/asense.desktop
   /usr/share/icons/hicolor/scalable/apps/asense.svg
@@ -140,7 +150,9 @@ collect_old_dkms_state() {
   local status_output
   local source
 
-  add_kernel_release "$KERNEL_RELEASE"
+  if ((INSTALL_DKMS)); then
+    add_kernel_release "$KERNEL_RELEASE"
+  fi
   status_output="$(asense_root dkms status -m "$DKMS_NAME")" ||
     asense_die "cannot inspect existing DKMS state for $DKMS_NAME"
   while IFS= read -r line; do
@@ -216,21 +228,29 @@ render_dkms_source() {
   asense_root install -o root -g root -m 0644 "$rendered" "$destination/dkms.conf"
 }
 
-wait_for_rgb_transport() {
-  local attempt
+inspect_wmi_endpoints() {
+  local guid
+  local owner
+  local path
+  local target
 
-  asense_root udevadm settle --timeout=10
-  for attempt in $(seq 1 100); do
-    if asense_root test -f "$RGB_SYSFS/power" &&
-      asense_root test -f "$RGB_SYSFS/effect" &&
-      asense_root test -f "$RGB_SYSFS/zones"; then
-      return 0
-    fi
-    sleep 0.1
+  for guid in "$GAMING_GUID" "$BATTERY_GUID" "$APGE_GUID"; do
+    for path in /sys/bus/wmi/devices/"$guid" /sys/bus/wmi/devices/"$guid"-*; do
+      [[ -d "$path" ]] || continue
+      HAS_KNOWN_WMI=1
+      if [[ -L "$path/driver" ]]; then
+        target="$(readlink -- "$path/driver" 2>/dev/null || true)"
+        if [[ -n "$target" ]]; then
+          owner="${target##*/}"
+          if [[ "$owner" != "asense_rgb" ]]; then
+            WMI_CONFLICTS+=("${path##*/}:$owner")
+            continue
+          fi
+        fi
+      fi
+      HAS_BINDABLE_WMI=1
+    done
   done
-  printf 'asense: RGB WMI transport did not bind at %s\n' "$RGB_SYSFS" >&2
-  asense_root journalctl --dmesg --boot --no-pager -n 30 >&2 || true
-  return 1
 }
 
 ping_control_service() {
@@ -242,9 +262,9 @@ client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.settimeout(5.0)
 client.connect("/run/asense-control.sock")
 reader = client.makefile("rb")
-client.sendall(b"HELLO 1\n")
+client.sendall(b"HELLO 2\n")
 handshake = reader.readline(4097)
-if re.fullmatch(rb"OK protocol=1 daemon=[^ \r\n]+\n", handshake) is None:
+if re.fullmatch(rb"OK protocol=2 daemon=[^ \r\n]+\n", handshake) is None:
     raise SystemExit(f"unexpected ASense protocol handshake: {handshake!r}")
 client.sendall(b"PING\n")
 response = reader.readline(4097)
@@ -390,6 +410,8 @@ restore_old_package() {
   done
   asense_root systemctl daemon-reload || true
   asense_root systemd-hwdb update || true
+  asense_root udevadm control --reload-rules || true
+  asense_root udevadm trigger --subsystem-match=hidraw --action=change || true
   asense_root udevadm trigger --subsystem-match=input --action=change || true
   asense_refresh_desktop_caches || true
 
@@ -430,7 +452,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for command in chown chmod cut dkms env flock getent grep install make modinfo modprobe python3 sed seq sha256sum systemctl systemd-hwdb touch udevadm; do
+for command in chown chmod cut dkms env flock getent grep install make modinfo modprobe python3 readlink sed sha256sum systemctl systemd-hwdb touch udevadm; do
   asense_require_command "$command"
 done
 asense_run_with_package_lock "$ROOT/install.sh" "$@"
@@ -439,38 +461,58 @@ asense_run_with_package_lock "$ROOT/install.sh" "$@"
 [[ -x "$BINARY" ]] || asense_die "release binary not found: $BINARY (run: cargo build --release)"
 [[ -x "$DAEMON_BINARY" ]] ||
   asense_die "release daemon not found: $DAEMON_BINARY (run: cargo build --release --bin asensed --no-default-features)"
-[[ -d "/lib/modules/$KERNEL_RELEASE/build" ]] ||
-  asense_die "kernel headers are missing for $KERNEL_RELEASE"
-
 asense_resolve_target_user "$TARGET_USER"
 asense_init_privilege
 asense_root true
-collect_old_dkms_state
 
-[[ "$(< /sys/class/dmi/id/sys_vendor)" == "Acer" ]] ||
-  asense_die "unsupported system vendor (expected Acer)"
-[[ "$(< /sys/class/dmi/id/product_name)" == "Predator PHN16-72" ]] ||
-  asense_die "unsupported model (expected Predator PHN16-72)"
+[[ "$SYSTEM_VENDOR" == "Acer" ]] && IS_ACER=1
+[[ "$SYSTEM_VENDOR" == "Acer" && "$SYSTEM_PRODUCT" == "Predator PHN16-72" ]] &&
+  IS_REFERENCE_MODEL=1
+if ((IS_ACER)); then
+  inspect_wmi_endpoints
+fi
+if ((IS_ACER && HAS_BINDABLE_WMI)); then
+  INSTALL_DKMS=1
+fi
+if ((!IS_ACER)); then
+  asense_warn "non-Acer system: installing the generic read-only application; Acer firmware controls stay unavailable"
+elif ((!HAS_KNOWN_WMI)); then
+  asense_warn "no known Acer WMI endpoint is currently present; kernel-backed profiles/hwmon and generic telemetry remain available"
+fi
+for conflict in "${WMI_CONFLICTS[@]}"; do
+  asense_warn "WMI endpoint ${conflict%%:*} is already owned by ${conflict#*:}; ASense will not create a second writer"
+done
+if ((!INSTALL_DKMS && HAS_KNOWN_WMI)); then
+  asense_warn "all known Acer WMI endpoints are already owned; installing kernel-backed and read-only controls only"
+fi
+if ((INSTALL_DKMS)); then
+  [[ -d "/lib/modules/$KERNEL_RELEASE/build" ]] ||
+    asense_die "kernel headers are missing for $KERNEL_RELEASE"
+fi
+collect_old_dkms_state
 
 TEMP_DIR="$(mktemp -d)"
 BACKUP_DIR="$(asense_root mktemp -d /var/tmp/asense-install-backup.XXXXXX)"
 asense_root chmod 0700 "$BACKUP_DIR"
 PROVENANCE_FILE="$TEMP_DIR/INSTALL-PROVENANCE.txt"
 create_install_provenance
-# Build the exact candidate through DKMS while the current installed module is
-# still registered and running.  This makes compilation failure non-destructive.
-CANDIDATE_VERSION="$DKMS_VERSION.candidate.$PPID.$$"
-CANDIDATE_SOURCE="/usr/src/$DKMS_NAME-$CANDIDATE_VERSION"
-render_dkms_source "$CANDIDATE_SOURCE" "$CANDIDATE_VERSION"
-CANDIDATE_REGISTERED=1
-asense_root dkms add -m "$DKMS_NAME" -v "$CANDIDATE_VERSION"
-for release in "${KERNEL_RELEASES[@]}"; do
-  asense_root dkms build -m "$DKMS_NAME" -v "$CANDIDATE_VERSION" -k "$release"
-done
-asense_root dkms remove --force -m "$DKMS_NAME" -v "$CANDIDATE_VERSION" --all
-CANDIDATE_REGISTERED=0
-asense_root rm -rf -- "$CANDIDATE_SOURCE"
-CANDIDATE_SOURCE=""
+if ((INSTALL_DKMS)); then
+  # Build the exact candidate through DKMS while the current installed module
+  # is still registered and running. This makes compilation failure
+  # non-destructive.
+  CANDIDATE_VERSION="$DKMS_VERSION.candidate.$PPID.$$"
+  CANDIDATE_SOURCE="/usr/src/$DKMS_NAME-$CANDIDATE_VERSION"
+  render_dkms_source "$CANDIDATE_SOURCE" "$CANDIDATE_VERSION"
+  CANDIDATE_REGISTERED=1
+  asense_root dkms add -m "$DKMS_NAME" -v "$CANDIDATE_VERSION"
+  for release in "${KERNEL_RELEASES[@]}"; do
+    asense_root dkms build -m "$DKMS_NAME" -v "$CANDIDATE_VERSION" -k "$release"
+  done
+  asense_root dkms remove --force -m "$DKMS_NAME" -v "$CANDIDATE_VERSION" --all
+  CANDIDATE_REGISTERED=0
+  asense_root rm -rf -- "$CANDIDATE_SOURCE"
+  CANDIDATE_SOURCE=""
+fi
 
 asense_root systemctl is-active --quiet asense.socket && OLD_SOCKET_ACTIVE=1 || true
 asense_root systemctl is-enabled --quiet asense.socket && OLD_SOCKET_ENABLED=1 || true
@@ -501,15 +543,17 @@ remove_registered_asense_versions
 for version in "${OLD_DKMS_VERSIONS[@]}"; do
   asense_root rm -rf -- "/usr/src/$DKMS_NAME-$version"
 done
-render_dkms_source "$DKMS_SOURCE" "$DKMS_VERSION"
-asense_root dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION"
-for release in "${KERNEL_RELEASES[@]}"; do
-  asense_root dkms build -m "$DKMS_NAME" -v "$DKMS_VERSION" -k "$release"
-  asense_root dkms install -m "$DKMS_NAME" -v "$DKMS_VERSION" -k "$release"
-done
-asense_root modprobe asense_rgb
-[[ -d /sys/module/asense_rgb ]] || asense_die "asense_rgb did not remain loaded"
-wait_for_rgb_transport
+if ((INSTALL_DKMS)); then
+  render_dkms_source "$DKMS_SOURCE" "$DKMS_VERSION"
+  asense_root dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION"
+  for release in "${KERNEL_RELEASES[@]}"; do
+    asense_root dkms build -m "$DKMS_NAME" -v "$DKMS_VERSION" -k "$release"
+    asense_root dkms install -m "$DKMS_NAME" -v "$DKMS_VERSION" -k "$release"
+  done
+  asense_root modprobe asense_rgb
+  [[ -d /sys/module/asense_rgb ]] || asense_die "asense_rgb did not remain loaded"
+  asense_root udevadm settle --timeout=10
+fi
 "$DAEMON_BINARY" --probe >/dev/null
 
 SOCKET_RENDERED="$TEMP_DIR/asense.socket"
@@ -535,20 +579,35 @@ asense_root install -D -o root -g root -m 0644 \
   "$SOCKET_RENDERED" /etc/systemd/system/asense.socket
 asense_root install -D -o root -g root -m 0755 \
   "$ROOT/packaging/asense-system-sleep" /usr/lib/systemd/system-sleep/asense
+if ((IS_ACER)); then
+  asense_root install -D -o root -g root -m 0644 \
+    "$ROOT/packaging/71-asense-hid.rules" /etc/udev/rules.d/71-asense-hid.rules
+else
+  asense_root rm -f -- /etc/udev/rules.d/71-asense-hid.rules
+fi
 asense_root install -D -o root -g root -m 0644 \
   "$ROOT/assets/asense.desktop" /usr/share/applications/asense.desktop
 asense_root install -D -o root -g root -m 0644 \
   "$ROOT/assets/asense.svg" /usr/share/icons/hicolor/scalable/apps/asense.svg
-asense_root install -D -o root -g root -m 0644 \
-  "$ROOT/packaging/90-asense-predator-key.hwdb" \
-  /etc/udev/hwdb.d/90-asense-predator-key.hwdb
+if ((IS_REFERENCE_MODEL)); then
+  asense_root install -D -o root -g root -m 0644 \
+    "$ROOT/packaging/90-asense-predator-key.hwdb" \
+    /etc/udev/hwdb.d/90-asense-predator-key.hwdb
+else
+  asense_root rm -f -- /etc/udev/hwdb.d/90-asense-predator-key.hwdb
+fi
 
 # Remove the obsolete per-user duplicate; the system desktop entry is visible
 # to the target user and has one authoritative lifecycle.
 asense_root rm -f -- "$ASENSE_TARGET_HOME/.local/share/applications/asense.desktop"
 asense_root systemd-hwdb update
-asense_root udevadm trigger --subsystem-match=input --action=change
+asense_root udevadm control --reload-rules
+asense_root udevadm trigger --subsystem-match=hidraw --action=change
 asense_root udevadm settle --timeout=10
+if ((IS_REFERENCE_MODEL)); then
+  asense_root udevadm trigger --subsystem-match=input --action=change
+  asense_root udevadm settle --timeout=10
+fi
 asense_root systemctl daemon-reload
 asense_root systemctl enable --now asense.socket
 asense_root systemctl is-active --quiet asense.socket || asense_die "asense.socket is not active"
@@ -556,22 +615,31 @@ verify_control_service
 asense_refresh_desktop_caches
 
 ROLLBACK_ARMED=0
-if ! asense_install_shortcut; then
+if ((IS_REFERENCE_MODEL)) && ! asense_install_shortcut; then
   asense_warn "system install succeeded, but the GNOME PredatorSense shortcut could not be installed"
 fi
 
-case "$ASENSE_SHORTCUT_STATUS" in
-  installed)
-    printf 'ASense %s installed for %s (Predator key: XF86Launch1).\n' \
-      "$DKMS_VERSION" "$ASENSE_TARGET_USER"
-    ;;
-  unavailable)
-    printf 'ASense %s installed for %s; hardware-key mapping installed, GNOME shortcut pending.\n' \
-      "$DKMS_VERSION" "$ASENSE_TARGET_USER"
-    ;;
-  *)
-    printf 'ASense %s installed for %s; hardware-key mapping installed, shortcut setup failed.\n' \
-      "$DKMS_VERSION" "$ASENSE_TARGET_USER"
-    ;;
-esac
-printf 'DKMS kernels: %s\n' "${KERNEL_RELEASES[*]}"
+if ((IS_REFERENCE_MODEL)); then
+  case "$ASENSE_SHORTCUT_STATUS" in
+    installed)
+      printf 'ASense %s installed for %s (Predator key: XF86Launch1).\n' \
+        "$DKMS_VERSION" "$ASENSE_TARGET_USER"
+      ;;
+    unavailable)
+      printf 'ASense %s installed for %s; Predator-key shortcut setup is pending.\n' \
+        "$DKMS_VERSION" "$ASENSE_TARGET_USER"
+      ;;
+    *)
+      printf 'ASense %s installed for %s; Predator-key shortcut setup failed.\n' \
+        "$DKMS_VERSION" "$ASENSE_TARGET_USER"
+      ;;
+  esac
+else
+  printf 'ASense %s installed for %s; launch it from the desktop menu or /usr/bin/asense.\n' \
+    "$DKMS_VERSION" "$ASENSE_TARGET_USER"
+fi
+if ((INSTALL_DKMS)); then
+  printf 'DKMS kernels: %s\n' "${KERNEL_RELEASES[*]}"
+else
+  printf 'DKMS: not installed (no unclaimed known Acer WMI endpoint).\n'
+fi

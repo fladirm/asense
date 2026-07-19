@@ -1,0 +1,76 @@
+name: Compatibility report
+description: Tell us which ASense features work on an Acer model
+title: "[Compatibility] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports from real laptops expand the model matrix. ASense capabilities
+        are independent, so partial results are useful too.
+
+  - type: input
+    id: model
+    attributes:
+      label: Exact Acer model
+      placeholder: Nitro AN16-43
+    validations:
+      required: true
+
+  - type: input
+    id: distribution
+    attributes:
+      label: Distribution
+      placeholder: Ubuntu 26.04
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      placeholder: Output of uname -r
+    validations:
+      required: true
+
+  - type: input
+    id: bios
+    attributes:
+      label: BIOS
+      placeholder: BIOS version reported by ASense
+    validations:
+      required: true
+
+  - type: textarea
+    id: works
+    attributes:
+      label: What works
+      placeholder: Profiles, RPM, Manual fans, keyboard RGB, battery limit...
+    validations:
+      required: true
+
+  - type: textarea
+    id: broken
+    attributes:
+      label: What does not work
+      placeholder: Missing controls, rejected writes, wrong readback...
+    validations:
+      required: true
+
+  - type: textarea
+    id: probe
+    attributes:
+      label: asense-probe.json
+      description: Run asense probe, review the JSON, then drag the file here.
+      placeholder: Attach asense-probe.json.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: This report comes from the exact physical model named above.
+          required: true
+        - label: I reviewed the probe file before attaching it.
+          required: true

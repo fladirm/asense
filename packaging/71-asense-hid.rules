@@ -1,0 +1,4 @@
+# ASense opens lighting controllers only from the root daemon. These rules run
+# after the generic uaccess tag is assigned and before seat-late applies ACLs.
+# The daemon still validates the exact HID identity and live capabilities.
+SUBSYSTEM=="hidraw", ATTRS{modalias}=="hid:b0018g*v00000CF2p00005130", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0600"

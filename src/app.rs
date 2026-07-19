@@ -14,7 +14,11 @@ use dioxus_desktop::{Config, WindowBuilder, use_window, use_wry_event_handler};
 use futures_util::future::poll_fn;
 use futures_util::task::AtomicWaker;
 
-use crate::control::{ControlClient, ControlError, ControlResult, ProfileApplyReceipt};
+use crate::control::{
+    CapabilityLightingBackend, CapabilityLightingTarget, CapabilityProfileBackend,
+    ControlCapabilities, ControlClient, ControlError, ControlLightingDevice, ControlLightingMode,
+    ControlLightingModes, ControlProfileChoice, ControlResult, ProfileApplyReceipt,
+};
 use crate::hardware::{
     AcerHardware, FanMode as HardwareFanMode, PlatformProfile as HardwareProfile,
 };
@@ -28,6 +32,8 @@ use crate::telemetry::{
     BatteryStatus, HardwareInfo, MemoryHardwareInfo, SystemTelemetry, TelemetryReader,
 };
 use crate::tuning::GpuOffsetState;
+
+mod docs_modal;
 
 const APP_CSS: &str = include_str!("../assets/style.css");
 #[allow(dead_code)]
@@ -45,6 +51,7 @@ const MIN_WINDOW_HEIGHT: f64 = 690.0;
 const MAX_WINDOW_HEIGHT: f64 = 1_100.0;
 const TELEMETRY_HISTORY_CAPACITY: usize = 120;
 const CONTROL_COMMAND_QUEUE_CAPACITY: usize = 1;
+const MAX_LIGHTING_ZONES: u8 = 16;
 // After an NVML refresh the telemetry reader reuses that snapshot for ten
 // following samples, so the next real read occurs on the eleventh. One extra
 // sample also covers an old value already queued when the command completes.
@@ -92,7 +99,7 @@ const RESIZE_SCRIPT: &str = r#"
 "#;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Language {
+pub(super) enum Language {
     Czech,
     #[default]
     English,
@@ -133,11 +140,16 @@ fn localized_status(language: Language, status: &str) -> String {
         return status.to_string();
     }
     match status {
-        "acer_wmi připojeno" => "acer_wmi connected".to_string(),
-        "acer_wmi + NVIDIA připojeno" => "acer_wmi + NVIDIA connected".to_string(),
-        "Připojuji acer_wmi" => "Connecting to acer_wmi".to_string(),
+        "Ovládání Acer připojeno" => "Acer controls connected".to_string(),
+        "Ovládání Acer + NVIDIA připojeno" => "Acer + NVIDIA controls connected".to_string(),
+        "Připojena telemetrie jen pro čtení" => "Read-only telemetry connected".to_string(),
+        "Připojuji ovládání" => "Connecting controls".to_string(),
         "Platforma znovu načtena" => "Platform state refreshed".to_string(),
         "Nastavení potvrzeno firmwarem" => "Settings confirmed by firmware".to_string(),
+        "Nastavení podsvícení potvrzeno firmwarem" => {
+            "Lighting confirmed by firmware".to_string()
+        }
+        "Použito · stav nelze přečíst" => "Applied · state readback unavailable".to_string(),
         "Zapisuji a ověřuji firmware" => "Writing and verifying firmware".to_string(),
         _ if status.starts_with("Profil potvrzen: ") => {
             status.replacen("Profil potvrzen:", "Profile verified:", 1)
@@ -183,6 +195,18 @@ fn compact_status(language: Language, status: &str) -> String {
             "Settings confirmed by firmware",
             "Nastavení potvrzeno",
             "Settings verified",
+        ),
+        (
+            "Nastavení podsvícení potvrzeno firmwarem",
+            "Lighting confirmed by firmware",
+            "Podsvícení potvrzeno",
+            "Lighting verified",
+        ),
+        (
+            "Použito · stav nelze přečíst",
+            "Applied · state readback unavailable",
+            "Naposledy použito",
+            "Last applied",
         ),
         (
             "Zapisuji a ověřuji firmware",
@@ -363,6 +387,12 @@ fn queue_aspect_resize(
             return;
         }
     } else {
+        // Updating compact/advanced constraints can emit an intermediate GTK
+        // resize before the requested target arrives. It is not a pointer
+        // request and must not be replayed after the target is acknowledged.
+        if resize.pending_correction.is_some() && resize.direction.is_none() {
+            return;
+        }
         resize.latest_request = Some(requested);
         // Keep exactly one native correction in flight. Pointer-driven sizes
         // arriving meanwhile replace latest_request and are handled as soon
@@ -424,14 +454,15 @@ fn set_window_mode(
         (f64::from(current.height) / scale_factor).clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
     let logical_target = logical_window_size(advanced, logical_height);
     let physical_target = logical_target.to_physical::<u32>(scale_factor);
+    {
+        let mut resize = state.borrow_mut();
+        resize.advanced = advanced;
+        resize.pending_correction = Some(physical_target);
+        resize.latest_request = None;
+        resize.direction = None;
+    }
     window.set_min_inner_size(Some(logical_window_size(advanced, MIN_WINDOW_HEIGHT)));
     window.set_max_inner_size(Some(logical_window_size(advanced, MAX_WINDOW_HEIGHT)));
-    let mut resize = state.borrow_mut();
-    resize.advanced = advanced;
-    resize.pending_correction = Some(physical_target);
-    resize.latest_request = None;
-    resize.direction = None;
-    drop(resize);
     window.set_inner_size(logical_target);
 }
 
@@ -467,7 +498,7 @@ impl RuntimeState {
             platform_busy: true,
             control_busy: true,
             health: HealthState::Applying,
-            status_message: "Připojuji acer_wmi".to_string(),
+            status_message: "Připojuji ovládání".to_string(),
             controls_enabled: false,
             telemetry_health: TelemetryHealth::Connecting,
             ..AppState::default()
@@ -485,7 +516,10 @@ enum TelemetryHealth {
 }
 
 enum TelemetryUpdate {
-    Sample(Box<SystemTelemetry>),
+    Sample {
+        sample: Box<SystemTelemetry>,
+        refresh_capabilities: bool,
+    },
     Error {
         message: String,
         retry_after: Duration,
@@ -566,40 +600,39 @@ enum PlatformAction {
     RearLogo(RearLogoState),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ControlAction {
     Initialize,
     FanMode(FanMode),
     ManualFans(ManualFanRequest),
-    Profile(PlatformProfile),
-    KeyboardZones(KeyboardZonesRequest),
-    KeyboardEffect(KeyboardEffectRequest),
-    KeyboardPower(bool),
+    Profile(String),
+    LightingApply(LightingApplyRequest),
+    LightingPower(LightingPowerRequest),
     Platform(PlatformAction),
     Refresh,
 }
 
 impl ControlAction {
-    fn touches_platform(self) -> bool {
+    fn touches_platform(&self) -> bool {
         matches!(self, Self::Initialize | Self::Platform(_) | Self::Refresh)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ControlRequest {
     action: ControlAction,
     foreground: bool,
 }
 
 impl ControlRequest {
-    const fn foreground(action: ControlAction) -> Self {
+    fn foreground(action: ControlAction) -> Self {
         Self {
             action,
             foreground: true,
         }
     }
 
-    const fn background(action: ControlAction) -> Self {
+    fn background(action: ControlAction) -> Self {
         Self {
             action,
             foreground: false,
@@ -609,7 +642,12 @@ impl ControlRequest {
 
 #[derive(Debug)]
 enum ControlOutcome {
+    RefreshedThen {
+        refresh: Box<ControlOutcome>,
+        result: Result<Box<ControlOutcome>, String>,
+    },
     Initialize {
+        capabilities: ControlCapabilities,
         lighting: Result<KeyboardLightingState, String>,
         memory_hardware: Result<MemoryHardwareInfo, String>,
         platform: Result<PlatformState, String>,
@@ -617,15 +655,20 @@ enum ControlOutcome {
     FanMode(FanMode),
     ManualFans(ManualFanRequest),
     Profile {
-        profile: PlatformProfile,
+        profile_raw: String,
         receipt: ProfileApplyReceipt,
     },
-    Lighting(KeyboardLightingState),
+    LightingApplied {
+        request: LightingApplyRequest,
+        firmware_state: Option<KeyboardLightingState>,
+    },
+    LightingPowered(KeyboardLightingState),
     Platform {
         action: PlatformAction,
         state: PlatformState,
     },
     Refresh {
+        capabilities: ControlCapabilities,
         lighting: Result<KeyboardLightingState, String>,
         platform: Result<PlatformState, String>,
     },
@@ -709,7 +752,7 @@ impl ControlWorker {
             .spawn(move || {
                 let mut control = None;
                 while let Ok(request) = receiver.recv() {
-                    let result = execute_control_action(&mut control, request.action);
+                    let result = execute_control_action(&mut control, request.action.clone());
                     if !results.publish(ControlUpdate { request, result }) {
                         eprintln!("asense: control result slot was unexpectedly full");
                         break;
@@ -762,20 +805,54 @@ fn Root() -> Element {
     use_effect(move || {
         let _ = document::eval(RESIZE_SCRIPT);
     });
+    let control_results = use_hook(ControlResultSlot::default);
+    let result_receiver = control_results.clone();
+    let _control_updates = use_future(move || {
+        let result_receiver = result_receiver.clone();
+        async move {
+            loop {
+                let update = result_receiver.receive().await;
+                apply_control_update(&mut runtime.write().view, update);
+            }
+        }
+    });
+    let worker_results = control_results.clone();
+    let control_worker = use_hook(move || ControlWorker::start(worker_results));
 
     let telemetry_slot = use_hook(TelemetrySlot::default);
     let telemetry_receiver = telemetry_slot.clone();
+    let resume_control_worker = control_worker.clone();
+    let pending_capability_refresh = use_hook(|| Arc::new(AtomicBool::new(false)));
+    let pending_refresh = pending_capability_refresh.clone();
     let _telemetry_updates = use_future(move || {
         let telemetry_receiver = telemetry_receiver.clone();
+        let resume_control_worker = resume_control_worker.clone();
+        let pending_refresh = pending_refresh.clone();
         async move {
             loop {
                 let update = telemetry_receiver.receive().await;
                 match update {
-                    TelemetryUpdate::Sample(sample) => {
+                    TelemetryUpdate::Sample {
+                        sample,
+                        refresh_capabilities,
+                    } => {
                         let mut state = runtime.write();
                         apply_telemetry(&mut state.view, *sample);
                         state.view.telemetry_health = TelemetryHealth::Online;
                         state.view.telemetry_error = None;
+                        drop(state);
+                        if refresh_capabilities {
+                            pending_refresh.store(true, Ordering::Release);
+                        }
+                        if pending_refresh.load(Ordering::Acquire)
+                            && queue_control_request(
+                                runtime,
+                                &resume_control_worker,
+                                ControlRequest::background(ControlAction::Refresh),
+                            )
+                        {
+                            pending_refresh.store(false, Ordering::Release);
+                        }
                     }
                     TelemetryUpdate::Error {
                         message,
@@ -792,24 +869,11 @@ fn Root() -> Element {
             }
         }
     });
-    let control_results = use_hook(ControlResultSlot::default);
-    let result_receiver = control_results.clone();
-    let _control_updates = use_future(move || {
-        let result_receiver = result_receiver.clone();
-        async move {
-            loop {
-                let update = result_receiver.receive().await;
-                apply_control_update(&mut runtime.write().view, update);
-            }
-        }
-    });
-    let worker_results = control_results.clone();
-    let control_worker = use_hook(move || ControlWorker::start(worker_results));
     let initial_worker = control_worker.clone();
     let initial_results = control_results.clone();
     use_hook(move || {
         let request = ControlRequest::background(ControlAction::Initialize);
-        if let Err(error) = initial_worker.submit(request) {
+        if let Err(error) = initial_worker.submit(request.clone()) {
             let _ = initial_results.publish(ControlUpdate {
                 request,
                 result: Err(error),
@@ -824,11 +888,13 @@ fn Root() -> Element {
             let mut hardware = None;
             let mut reader = TelemetryReader::new();
             let mut consecutive_failures = 0_u32;
+            let mut refresh_capabilities = false;
             loop {
                 if telemetry_resume.swap(false, Ordering::AcqRel) {
                     hardware = None;
                     reader.invalidate_nvidia_session();
                     consecutive_failures = 0;
+                    refresh_capabilities = true;
                 }
                 if hardware.is_none() {
                     match AcerHardware::discover() {
@@ -852,7 +918,11 @@ fn Root() -> Element {
                 match reader.sample(active_hardware) {
                     Ok(sample) => {
                         consecutive_failures = 0;
-                        telemetry_slot.publish_latest(TelemetryUpdate::Sample(Box::new(sample)));
+                        telemetry_slot.publish_latest(TelemetryUpdate::Sample {
+                            sample: Box::new(sample),
+                            refresh_capabilities,
+                        });
+                        refresh_capabilities = false;
                         std::thread::sleep(Duration::from_secs(1));
                     }
                     Err(error) => {
@@ -877,9 +947,8 @@ fn Root() -> Element {
     let fan_mode_worker = control_worker.clone();
     let manual_fans_worker = control_worker.clone();
     let profile_worker = control_worker.clone();
-    let keyboard_zones_worker = control_worker.clone();
-    let keyboard_effect_worker = control_worker.clone();
-    let keyboard_power_worker = control_worker.clone();
+    let lighting_worker = control_worker.clone();
+    let lighting_power_worker = control_worker.clone();
     let platform_worker = control_worker.clone();
     let refresh_worker = control_worker.clone();
     let mode_window = desktop.clone();
@@ -901,20 +970,27 @@ fn Root() -> Element {
                         on_fan_mode: move |mode| set_fan_mode(runtime, &fan_mode_worker, mode),
                         on_manual_fans: move |request| set_manual_fans(runtime, &manual_fans_worker, request),
                         on_profile: move |profile| set_platform_profile(runtime, &profile_worker, profile),
-                        on_keyboard_zones: move |request| set_keyboard_zones(runtime, &keyboard_zones_worker, request),
-                        on_keyboard_effect: move |request| set_keyboard_effect(runtime, &keyboard_effect_worker, request),
-                        on_keyboard_power: move |enabled| set_keyboard_power(runtime, &keyboard_power_worker, enabled),
-                        on_platform: move |action| queue_control_request(
+                        on_lighting: move |request| apply_lighting(runtime, &lighting_worker, request),
+                        on_lighting_power: move |request| set_lighting_power(
                             runtime,
-                            &platform_worker,
-                            ControlRequest::foreground(ControlAction::Platform(action)),
+                            &lighting_power_worker,
+                            request,
                         ),
+                        on_platform: move |action| {
+                            queue_control_request(
+                                runtime,
+                                &platform_worker,
+                                ControlRequest::foreground(ControlAction::Platform(action)),
+                            );
+                        },
                         on_language: move |_| language.set(language().toggle()),
-                        on_refresh: move |_| queue_control_request(
-                            runtime,
-                            &refresh_worker,
-                            ControlRequest::foreground(ControlAction::Refresh),
-                        ),
+                        on_refresh: move |_| {
+                            queue_control_request(
+                                runtime,
+                                &refresh_worker,
+                                ControlRequest::foreground(ControlAction::Refresh),
+                            );
+                        },
                         on_advanced: move |open| {
                             advanced_open.set(open);
                             set_window_mode(&mode_window, &mode_aspect_state, open);
@@ -1033,22 +1109,96 @@ fn parse_lighting_response(response: String) -> ControlResult<KeyboardLightingSt
         .map_err(|error| ControlError::Protocol(format!("invalid RGB response: {error}")))
 }
 
+fn keyboard_lighting_snapshot(
+    client: &mut ControlClient,
+    capabilities: &ControlCapabilities,
+) -> ControlResult<KeyboardLightingState> {
+    if capabilities.lighting.iter().any(|device| {
+        device.target == CapabilityLightingTarget::Keyboard
+            && device.backend == CapabilityLightingBackend::ZonedWmi
+            && device.state_readable
+    }) {
+        return client.keyboard_state().and_then(parse_lighting_response);
+    }
+    if capabilities
+        .lighting
+        .iter()
+        .any(|device| device.target == CapabilityLightingTarget::Keyboard)
+    {
+        return Ok(KeyboardLightingState {
+            available: true,
+            ..KeyboardLightingState::default()
+        });
+    }
+    Ok(KeyboardLightingState::default())
+}
+
+fn empty_platform_state() -> PlatformState {
+    PlatformState {
+        battery_limit: None,
+        battery_calibration: None,
+        usb_charging: None,
+        keyboard_timeout: None,
+        boot_sound: None,
+        lcd_override: None,
+        rear_logo: None,
+        read_error_mask: 0,
+    }
+}
+
+fn platform_snapshot(
+    client: &mut ControlClient,
+    capabilities: &ControlCapabilities,
+) -> ControlResult<PlatformState> {
+    let platform = capabilities.platform;
+    if platform.battery_limit
+        || platform.battery_calibration
+        || platform.usb_off_charging
+        || platform.keyboard_timeout
+        || platform.boot_sound
+        || platform.lcd_override
+        || platform.rear_logo
+    {
+        client.platform_state()
+    } else {
+        Ok(empty_platform_state())
+    }
+}
+
 fn execute_control_action(
     control: &mut Option<ControlClient>,
     action: ControlAction,
 ) -> Result<ControlOutcome, String> {
+    if matches!(&action, ControlAction::Initialize | ControlAction::Refresh) {
+        return execute_control_action_inner(control, action);
+    }
+    let refresh = if control.is_none() {
+        Some(reconnect_control(control)?)
+    } else {
+        None
+    };
+    let result = execute_control_action_inner(control, action);
+    Ok(match refresh {
+        Some(refresh) => ControlOutcome::RefreshedThen {
+            refresh: Box::new(refresh),
+            result: result.map(Box::new),
+        },
+        None => return result,
+    })
+}
+
+fn execute_control_action_inner(
+    control: &mut Option<ControlClient>,
+    action: ControlAction,
+) -> Result<ControlOutcome, String> {
     match action {
-        ControlAction::Initialize => with_control(control, |client| {
-            let lighting =
-                partial_control_result(client.keyboard_state().and_then(parse_lighting_response))?;
-            let memory_hardware = partial_control_result(client.memory_hardware_info())?;
-            let platform = partial_control_result(client.platform_state())?;
-            Ok(ControlOutcome::Initialize {
-                lighting,
-                memory_hardware,
-                platform,
-            })
-        }),
+        ControlAction::Initialize => match initialize_control(control) {
+            Ok(first) => Ok(first),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(500));
+                initialize_control(control)
+            }
+        },
         ControlAction::FanMode(mode) => with_control(control, |client| match mode {
             FanMode::Auto => client.fan_auto(),
             FanMode::Manual => Err(ControlError::InvalidRequest(
@@ -1061,54 +1211,44 @@ fn execute_control_action(
             client.fan_manual(request.cpu_percent, request.gpu_percent)
         })
         .map(|()| ControlOutcome::ManualFans(request)),
-        ControlAction::Profile(profile) => with_control(control, |client| {
-            let receipt = client.set_profile(profile.as_sysfs())?;
-            if receipt.firmware_profile.as_sysfs() != profile.as_sysfs() {
+        ControlAction::Profile(profile_raw) => with_control(control, |client| {
+            let receipt = client.set_profile(&profile_raw)?;
+            if receipt.firmware_profile != profile_raw {
                 return Err(ControlError::Protocol(format!(
                     "control receipt mismatch: requested {}, firmware confirmed {}",
-                    profile.as_sysfs(),
-                    receipt.firmware_profile
+                    profile_raw, receipt.firmware_profile
                 )));
             }
-            Ok(ControlOutcome::Profile { profile, receipt })
+            Ok(ControlOutcome::Profile {
+                profile_raw,
+                receipt,
+            })
         }),
-        ControlAction::KeyboardZones(request) => {
-            let colors = request.zones.map(|color| format!("{color:06x}"));
-            with_control(control, |client| {
-                client
-                    .keyboard_zones(
-                        [&colors[0], &colors[1], &colors[2], &colors[3]],
-                        request.brightness,
-                    )
-                    .and_then(parse_lighting_response)
+        ControlAction::LightingApply(request) => with_control(control, |client| {
+            let response = client.lighting_apply(
+                &request.device_id,
+                request.mode,
+                request.brightness,
+                request.speed,
+                request.color,
+                &request.zone_colors,
+            )?;
+            let firmware_state = if request.state_readable {
+                Some(parse_lighting_response(response)?)
+            } else {
+                None
+            };
+            Ok(ControlOutcome::LightingApplied {
+                request,
+                firmware_state,
             })
-            .map(ControlOutcome::Lighting)
-        }
-        ControlAction::KeyboardEffect(request) => {
-            let color = [
-                (request.color >> 16) as u8,
-                (request.color >> 8) as u8,
-                request.color as u8,
-            ];
-            with_control(control, |client| {
-                client
-                    .keyboard_effect(
-                        request.mode,
-                        request.speed,
-                        request.brightness,
-                        request.direction,
-                        color,
-                    )
-                    .and_then(parse_lighting_response)
-            })
-            .map(ControlOutcome::Lighting)
-        }
-        ControlAction::KeyboardPower(enabled) => with_control(control, |client| {
+        }),
+        ControlAction::LightingPower(request) => with_control(control, |client| {
             client
-                .keyboard_power(enabled)
+                .lighting_power(&request.device_id, request.enabled)
                 .and_then(parse_lighting_response)
-        })
-        .map(ControlOutcome::Lighting),
+                .map(ControlOutcome::LightingPowered)
+        }),
         ControlAction::Platform(action) => with_control(control, |client| match action {
             PlatformAction::Refresh => client.platform_state(),
             PlatformAction::BatteryLimit(enabled) => client.set_battery_limit(enabled),
@@ -1122,6 +1262,21 @@ fn execute_control_action(
         .map(|state| ControlOutcome::Platform { action, state }),
         ControlAction::Refresh => reconnect_control(control),
     }
+}
+
+fn initialize_control(control: &mut Option<ControlClient>) -> Result<ControlOutcome, String> {
+    with_control(control, |client| {
+        let capabilities = client.capabilities()?;
+        let lighting = partial_control_result(keyboard_lighting_snapshot(client, &capabilities))?;
+        let memory_hardware = partial_control_result(client.memory_hardware_info())?;
+        let platform = partial_control_result(platform_snapshot(client, &capabilities))?;
+        Ok(ControlOutcome::Initialize {
+            capabilities,
+            lighting,
+            memory_hardware,
+            platform,
+        })
+    })
 }
 
 fn reconnect_control(control: &mut Option<ControlClient>) -> Result<ControlOutcome, String> {
@@ -1141,10 +1296,14 @@ fn reconnect_control(control: &mut Option<ControlClient>) -> Result<ControlOutco
         *control = Some(ControlClient::connect().map_err(String::from)?);
     }
     with_control(control, |client| {
-        let lighting =
-            partial_control_result(client.keyboard_state().and_then(parse_lighting_response))?;
-        let platform = partial_control_result(client.platform_state())?;
-        Ok(ControlOutcome::Refresh { lighting, platform })
+        let capabilities = client.capabilities()?;
+        let lighting = partial_control_result(keyboard_lighting_snapshot(client, &capabilities))?;
+        let platform = partial_control_result(platform_snapshot(client, &capabilities))?;
+        Ok(ControlOutcome::Refresh {
+            capabilities,
+            lighting,
+            platform,
+        })
     })
 }
 
@@ -1152,16 +1311,18 @@ fn queue_control_request(
     mut runtime: Signal<RuntimeState>,
     worker: &ControlWorker,
     request: ControlRequest,
-) {
+) -> bool {
     {
         let mut state = runtime.write();
-        if !begin_control_request(&mut state.view, request) {
-            return;
+        if !begin_control_request(&mut state.view, request.clone()) {
+            return false;
         }
     }
-    if let Err(error) = worker.submit(request) {
+    if let Err(error) = worker.submit(request.clone()) {
         fail_control_request(&mut runtime.write().view, request, error);
+        return false;
     }
+    true
 }
 
 fn begin_control_request(view: &mut AppState, request: ControlRequest) -> bool {
@@ -1174,7 +1335,7 @@ fn begin_control_request(view: &mut AppState, request: ControlRequest) -> bool {
     }
     if request.foreground {
         view.health = HealthState::Applying;
-        if matches!(request.action, ControlAction::Platform(_)) {
+        if matches!(&request.action, ControlAction::Platform(_)) {
             view.status_message = "Zapisuji a ověřuji firmware".to_string();
         }
     }
@@ -1206,22 +1367,14 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
     let outcome = match update.result {
         Ok(outcome) => outcome,
         Err(error) => {
-            if matches!(update.request.action, ControlAction::Profile(_)) {
-                // A failed/ambiguous transaction can also leave one hybrid
-                // telemetry sample in flight. Preserve both the last
-                // confirmed selection and the more useful control error while
-                // the independently cached GPU readback turns over.
-                view.profile_sync = ProfileTelemetrySync {
-                    target: Some(view.platform_profile),
-                    grace_samples: PROFILE_SYNC_GRACE_SAMPLES,
-                    mismatch_samples: 0,
-                };
+            if matches!(&update.request.action, ControlAction::Profile(_)) {
+                view.profile_sync = ProfileTelemetrySync::default();
             }
             if update.request.action.touches_platform() {
                 view.platform_error = Some(error.clone());
             }
             if matches!(
-                update.request.action,
+                &update.request.action,
                 ControlAction::Initialize | ControlAction::Refresh
             ) {
                 view.controls_enabled = false;
@@ -1235,24 +1388,30 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
     };
 
     match outcome {
+        ControlOutcome::RefreshedThen { refresh, result } => {
+            apply_control_update(
+                view,
+                ControlUpdate {
+                    request: ControlRequest::background(ControlAction::Refresh),
+                    result: Ok(*refresh),
+                },
+            );
+            apply_control_update(
+                view,
+                ControlUpdate {
+                    request: update.request,
+                    result: result.map(|outcome| *outcome),
+                },
+            );
+        }
         ControlOutcome::Initialize {
+            capabilities,
             lighting,
             memory_hardware,
             platform,
         } => {
-            view.controls_enabled = true;
-            let mut diagnostics = Vec::new();
-            match lighting {
-                Ok(lighting) => {
-                    view.lighting = lighting;
-                    view.lighting_error = None;
-                }
-                Err(error) => {
-                    view.lighting.available = false;
-                    view.lighting_error = Some(error.clone());
-                    diagnostics.push(format!("RGB: {error}"));
-                }
-            }
+            let (acer_controls, mut diagnostics) =
+                apply_capability_snapshot(view, capabilities, lighting, platform);
             match memory_hardware {
                 Ok(memory_hardware) => {
                     view.hardware.memory = memory_hardware;
@@ -1263,19 +1422,13 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
                     diagnostics.push(format!("hardware: {error}"));
                 }
             }
-            match platform {
-                Ok(platform) => {
-                    if let Some(error) = store_platform_state(view, platform) {
-                        diagnostics.push(format!("platform: {error}"));
-                    }
-                }
-                Err(error) => {
-                    view.platform_error = Some(error.clone());
-                    diagnostics.push(format!("platform: {error}"));
-                }
-            }
             if diagnostics.is_empty() {
-                finish_control_success(view, "acer_wmi připojeno");
+                let status = if acer_controls {
+                    "Ovládání Acer připojeno"
+                } else {
+                    "Připojena telemetrie jen pro čtení"
+                };
+                finish_control_success(view, status);
             } else {
                 view.health = HealthState::Warning;
                 view.status_message = format!("Částečné capabilities: {}", diagnostics.join("; "));
@@ -1291,18 +1444,44 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
             view.gpu_fan_percent = request.gpu_percent;
             finish_control_success(view, "Nastavení potvrzeno firmwarem");
         }
-        ControlOutcome::Profile { profile, receipt } => {
-            view.platform_profile = profile;
+        ControlOutcome::Profile {
+            profile_raw,
+            receipt,
+        } => {
+            view.platform_profile_raw = Some(profile_raw.clone());
+            let profile = profile_from_raw_for_machine(
+                &profile_raw,
+                view.capabilities
+                    .as_ref()
+                    .is_none_or(|capabilities| capabilities.reference_model),
+            );
+            if let Some(profile) = profile {
+                view.platform_profile = profile;
+            }
             view.profile_sync = ProfileTelemetrySync {
-                target: Some(profile),
+                target: profile,
                 grace_samples: PROFILE_SYNC_GRACE_SAMPLES,
                 mismatch_samples: 0,
             };
             finish_control_success(view, &profile_receipt_status(&receipt));
         }
-        ControlOutcome::Lighting(lighting) => {
-            view.lighting = lighting;
-            finish_control_success(view, "Nastavení potvrzeno firmwarem");
+        ControlOutcome::LightingApplied {
+            request,
+            firmware_state,
+        } => {
+            let state_readable = firmware_state.is_some();
+            if let Some(state) = firmware_state {
+                view.lighting = state;
+            } else {
+                view.last_applied_lighting
+                    .retain(|previous| previous.device_id != request.device_id);
+                view.last_applied_lighting.push(request);
+            }
+            finish_control_success(view, lighting_apply_status(state_readable));
+        }
+        ControlOutcome::LightingPowered(state) => {
+            view.lighting = state;
+            finish_control_success(view, "Nastavení podsvícení potvrzeno firmwarem");
         }
         ControlOutcome::Platform { action, state } => {
             let read_error = store_platform_state(view, state);
@@ -1317,31 +1496,13 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
                 finish_control_success(view, status);
             }
         }
-        ControlOutcome::Refresh { lighting, platform } => {
-            view.controls_enabled = true;
-            let mut diagnostics = Vec::new();
-            match lighting {
-                Ok(lighting) => {
-                    view.lighting = lighting;
-                    view.lighting_error = None;
-                }
-                Err(error) => {
-                    view.lighting.available = false;
-                    view.lighting_error = Some(error.clone());
-                    diagnostics.push(format!("RGB: {error}"));
-                }
-            }
-            match platform {
-                Ok(platform) => {
-                    if let Some(error) = store_platform_state(view, platform) {
-                        diagnostics.push(format!("platform: {error}"));
-                    }
-                }
-                Err(error) => {
-                    view.platform_error = Some(error.clone());
-                    diagnostics.push(format!("platform: {error}"));
-                }
-            }
+        ControlOutcome::Refresh {
+            capabilities,
+            lighting,
+            platform,
+        } => {
+            let (_, diagnostics) =
+                apply_capability_snapshot(view, capabilities, lighting, platform);
             if diagnostics.is_empty() {
                 finish_control_success(view, "Platforma znovu načtena");
             } else {
@@ -1352,8 +1513,59 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
     }
 }
 
+fn apply_capability_snapshot(
+    view: &mut AppState,
+    capabilities: ControlCapabilities,
+    lighting: Result<KeyboardLightingState, String>,
+    platform: Result<PlatformState, String>,
+) -> (bool, Vec<String>) {
+    let reference_model = capabilities.reference_model;
+    let acer_controls = capabilities.vendor.trim().eq_ignore_ascii_case("acer");
+    view.platform_profile_raw = capabilities.profiles.current.clone();
+    if let Some(profile) = view
+        .platform_profile_raw
+        .as_deref()
+        .and_then(|raw| profile_from_raw_for_machine(raw, reference_model))
+    {
+        view.platform_profile = profile;
+    }
+    view.model_name = format!("{} {}", capabilities.vendor, capabilities.product);
+    view.capabilities = Some(capabilities);
+    view.controls_enabled = true;
+
+    let mut diagnostics = Vec::new();
+    match lighting {
+        Ok(lighting) => {
+            view.lighting = lighting;
+            view.lighting_error = None;
+        }
+        Err(error) => {
+            view.lighting.available = false;
+            view.lighting_error = Some(error.clone());
+            diagnostics.push(format!("RGB: {error}"));
+        }
+    }
+    match platform {
+        Ok(platform) => {
+            if let Some(error) = store_platform_state(view, platform) {
+                diagnostics.push(format!("platform: {error}"));
+            }
+        }
+        Err(error) => {
+            view.platform_error = Some(error.clone());
+            diagnostics.push(format!("platform: {error}"));
+        }
+    }
+    (acer_controls, diagnostics)
+}
+
 fn store_platform_state(view: &mut AppState, platform: PlatformState) -> Option<String> {
     let error = platform_read_error_summary(platform.read_error_mask);
+    if let Some(logo) = platform.rear_logo
+        && logo.brightness > 0
+    {
+        view.rear_logo_last_nonzero_brightness = logo.brightness;
+    }
     view.platform = Some(platform);
     view.platform_error = error.clone();
     view.platform_revision = view.platform_revision.wrapping_add(1);
@@ -1386,6 +1598,14 @@ fn finish_control_success(view: &mut AppState, status: &str) {
     view.status_message = status.to_string();
 }
 
+fn lighting_apply_status(state_readable: bool) -> &'static str {
+    if state_readable {
+        "Nastavení potvrzeno firmwarem"
+    } else {
+        "Použito · stav nelze přečíst"
+    }
+}
+
 fn profile_receipt_status(receipt: &ProfileApplyReceipt) -> String {
     let offsets = match receipt.gpu_offsets {
         GpuOffsetState::Unavailable => "nedostupné".to_string(),
@@ -1405,7 +1625,7 @@ fn profile_receipt_status(receipt: &ProfileApplyReceipt) -> String {
     );
     format!(
         "Profil potvrzen: Acer {} · VF {offsets} · {power}",
-        receipt.firmware_profile.as_sysfs()
+        receipt.firmware_profile
     )
 }
 
@@ -1445,44 +1665,36 @@ fn set_manual_fans(
 fn set_platform_profile(
     runtime: Signal<RuntimeState>,
     worker: &ControlWorker,
-    profile: PlatformProfile,
+    profile_raw: String,
 ) {
     queue_control_request(
         runtime,
         worker,
-        ControlRequest::foreground(ControlAction::Profile(profile)),
+        ControlRequest::foreground(ControlAction::Profile(profile_raw)),
     );
 }
 
-fn set_keyboard_zones(
+fn apply_lighting(
     runtime: Signal<RuntimeState>,
     worker: &ControlWorker,
-    request: KeyboardZonesRequest,
+    request: LightingApplyRequest,
 ) {
     queue_control_request(
         runtime,
         worker,
-        ControlRequest::foreground(ControlAction::KeyboardZones(request)),
+        ControlRequest::foreground(ControlAction::LightingApply(request)),
     );
 }
 
-fn set_keyboard_effect(
+fn set_lighting_power(
     runtime: Signal<RuntimeState>,
     worker: &ControlWorker,
-    request: KeyboardEffectRequest,
+    request: LightingPowerRequest,
 ) {
     queue_control_request(
         runtime,
         worker,
-        ControlRequest::foreground(ControlAction::KeyboardEffect(request)),
-    );
-}
-
-fn set_keyboard_power(runtime: Signal<RuntimeState>, worker: &ControlWorker, enabled: bool) {
-    queue_control_request(
-        runtime,
-        worker,
-        ControlRequest::foreground(ControlAction::KeyboardPower(enabled)),
+        ControlRequest::foreground(ControlAction::LightingPower(request)),
     );
 }
 
@@ -1493,9 +1705,9 @@ fn clear_profile_mismatch(view: &mut AppState, nvidia_offsets_available: bool) {
     {
         view.health = HealthState::Healthy;
         view.status_message = if nvidia_offsets_available {
-            "acer_wmi + NVIDIA připojeno"
+            "Ovládání Acer + NVIDIA připojeno"
         } else {
-            "acer_wmi připojeno"
+            "Ovládání Acer připojeno"
         }
         .to_string();
     }
@@ -1531,6 +1743,7 @@ fn reconcile_profile_telemetry(
         // thread's slower offset cache catches up with the profile sample.
         if observed_profile == target && synchronization != Some(false) {
             view.platform_profile = target;
+            view.platform_profile_raw = Some(target.as_sysfs().to_string());
             view.profile_sync = ProfileTelemetrySync::default();
             clear_profile_mismatch(view, synchronization.is_some());
             return;
@@ -1551,6 +1764,7 @@ fn reconcile_profile_telemetry(
                 return;
             }
             view.platform_profile = observed_profile;
+            view.platform_profile_raw = Some(observed_profile.as_sysfs().to_string());
             let Some((core, memory, _)) = offset_readback else {
                 return;
             };
@@ -1560,11 +1774,13 @@ fn reconcile_profile_telemetry(
         }
         Some(true) => {
             view.platform_profile = observed_profile;
+            view.platform_profile_raw = Some(observed_profile.as_sysfs().to_string());
             view.profile_sync.mismatch_samples = 0;
             clear_profile_mismatch(view, true);
         }
         None => {
             view.platform_profile = observed_profile;
+            view.platform_profile_raw = Some(observed_profile.as_sysfs().to_string());
             view.profile_sync.mismatch_samples = 0;
             clear_profile_mismatch(view, false);
         }
@@ -1576,17 +1792,38 @@ fn apply_telemetry(view: &mut AppState, sample: SystemTelemetry) {
     let mut hardware = sample.hardware;
     merge_privileged_memory(&mut hardware.memory, privileged_memory);
     view.hardware = hardware;
+    let gpu_aux_fan_rpm = sample
+        .fan_rpm_channels
+        .iter()
+        .find(|channel| channel.index == 3)
+        .and_then(|channel| channel.rpm);
+    let primary_fan_rpm = |index| {
+        sample
+            .fan_rpm_channels
+            .iter()
+            .find(|channel| channel.index == index)
+            .and_then(|channel| channel.rpm)
+    };
+    let additional_fans = sample
+        .fan_rpm_channels
+        .iter()
+        .filter(|channel| channel.index >= 4)
+        .filter_map(|channel| channel.rpm.map(|rpm| (channel.label.clone(), rpm)))
+        .collect();
     view.telemetry = Telemetry {
         cpu_temperature_c: sample.cpu_temperature_c,
         cpu_load_percent: sample.cpu_utilization_percent,
         memory_used_mib: Some(sample.memory_used_mib),
         memory_total_mib: Some(sample.memory_total_mib),
-        cpu_fan_rpm: Some(sample.fans.cpu.rpm),
+        cpu_fan_rpm: primary_fan_rpm(1),
         cpu_fan_max_rpm: 8_000,
         gpu_temperature_c: sample.gpu.temperature_c,
+        gpu_sleeping: sample.gpu.sleeping,
         gpu_load_percent: sample.gpu.utilization_percent,
-        gpu_fan_rpm: Some(sample.fans.gpu.rpm),
+        gpu_fan_rpm: primary_fan_rpm(2),
         gpu_fan_max_rpm: 7_000,
+        gpu_aux_fan_rpm,
+        additional_fans,
         gpu_power_w: sample.gpu.power_w,
         gpu_pstate: sample.gpu.pstate.clone(),
         gpu_memory_used_mib: sample.gpu.memory_used_mib,
@@ -1606,13 +1843,38 @@ fn apply_telemetry(view: &mut AppState, sample: SystemTelemetry) {
         usb_power_online: sample.power_supply.usb_power_online,
     };
     view.history.push(TelemetryPoint::from(&view.telemetry));
-    reconcile_profile_telemetry(
-        view,
-        sample.profile,
-        sample.gpu.core_offset_mhz,
-        sample.gpu.memory_offset_mhz,
-        sample.gpu.offsets_uniform,
-    );
+    let reference_model = view
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.reference_model);
+    if reference_model {
+        if view.profile_sync.target.is_none() {
+            view.platform_profile_raw = sample.profile_raw.clone();
+        }
+        if let Some(profile) = sample.profile {
+            reconcile_profile_telemetry(
+                view,
+                profile,
+                sample.gpu.core_offset_mhz,
+                sample.gpu.memory_offset_mhz,
+                sample.gpu.offsets_uniform,
+            );
+        } else if view.profile_sync.target.is_some() {
+            view.profile_sync.grace_samples = view.profile_sync.grace_samples.saturating_sub(1);
+            if view.profile_sync.grace_samples == 0 {
+                view.profile_sync = ProfileTelemetrySync::default();
+                view.platform_profile_raw = sample.profile_raw.clone();
+            }
+        }
+    } else {
+        view.profile_sync = ProfileTelemetrySync::default();
+        view.platform_profile_raw = sample.profile_raw.clone();
+        if let Some(raw) = sample.profile_raw.as_deref()
+            && let Some(profile) = profile_from_raw_for_machine(raw, false)
+        {
+            view.platform_profile = profile;
+        }
+    }
     if let (Some(cpu_mode), Some(gpu_mode)) = (sample.fans.cpu.mode, sample.fans.gpu.mode)
         && cpu_mode == gpu_mode
     {
@@ -1729,6 +1991,55 @@ impl PlatformProfile {
             HardwareProfile::Turbo => Self::Turbo,
         }
     }
+
+    fn from_raw(raw: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|profile| profile.as_sysfs() == raw)
+    }
+}
+
+fn profile_from_raw_for_machine(raw: &str, reference_model: bool) -> Option<PlatformProfile> {
+    if !reference_model && raw == "performance" {
+        return Some(PlatformProfile::Performance);
+    }
+    PlatformProfile::from_raw(raw)
+}
+
+fn profile_label_for_machine(
+    raw: &str,
+    language: Language,
+    reference_model: bool,
+) -> Option<&'static str> {
+    profile_from_raw_for_machine(raw, reference_model).map(|profile| profile.label(language))
+}
+
+fn profile_display_label(
+    raw: Option<&str>,
+    fallback: PlatformProfile,
+    capabilities: Option<&ControlCapabilities>,
+    language: Language,
+) -> String {
+    let Some(raw) = raw else {
+        if capabilities.is_some_and(|capabilities| capabilities.profiles.backend.is_none()) {
+            return tr(language, "Nedostupné", "Unavailable").to_string();
+        }
+        return fallback.label(language).to_string();
+    };
+    let reference_model = capabilities.is_none_or(|capabilities| capabilities.reference_model);
+    if let Some(label) = profile_label_for_machine(raw, language, reference_model) {
+        return label.to_string();
+    }
+    capabilities
+        .and_then(|capabilities| {
+            capabilities
+                .profiles
+                .choices
+                .iter()
+                .find(|choice| choice.raw == raw)
+        })
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| raw.replace('-', " "))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1766,9 +2077,12 @@ pub struct Telemetry {
     pub cpu_fan_rpm: Option<u32>,
     pub cpu_fan_max_rpm: u32,
     pub gpu_temperature_c: Option<f32>,
+    pub gpu_sleeping: bool,
     pub gpu_load_percent: Option<f32>,
     pub gpu_fan_rpm: Option<u32>,
     pub gpu_fan_max_rpm: u32,
+    pub gpu_aux_fan_rpm: Option<u32>,
+    pub additional_fans: Vec<(String, u32)>,
     pub gpu_power_w: Option<f32>,
     pub gpu_pstate: Option<String>,
     pub gpu_memory_used_mib: Option<u64>,
@@ -1804,20 +2118,22 @@ pub struct TelemetryPoint {
 
 impl From<&Telemetry> for TelemetryPoint {
     fn from(value: &Telemetry) -> Self {
+        let gpu_zero = value.gpu_sleeping.then_some(0.0);
         Self {
             cpu_load_percent: value.cpu_load_percent,
             memory_load_percent: ratio_percent(value.memory_used_mib, value.memory_total_mib),
-            gpu_load_percent: value.gpu_load_percent,
+            gpu_load_percent: gpu_zero.or(value.gpu_load_percent),
             gpu_memory_load_percent: ratio_percent(
                 value.gpu_memory_used_mib,
                 value.gpu_memory_total_mib,
             ),
             cpu_temperature_c: value.cpu_temperature_c,
             gpu_temperature_c: value.gpu_temperature_c,
-            gpu_power_w: value.gpu_power_w,
+            gpu_power_w: gpu_zero.or(value.gpu_power_w),
             gpu_power_limit_w: value.gpu_enforced_power_limit_w,
-            gpu_graphics_clock_mhz: value.gpu_graphics_clock_mhz.map(|value| value as f32),
-            gpu_memory_clock_mhz: value.gpu_memory_clock_mhz.map(|value| value as f32),
+            gpu_graphics_clock_mhz: gpu_zero
+                .or(value.gpu_graphics_clock_mhz.map(|value| value as f32)),
+            gpu_memory_clock_mhz: gpu_zero.or(value.gpu_memory_clock_mhz.map(|value| value as f32)),
         }
     }
 }
@@ -1904,14 +2220,18 @@ pub struct AppState {
     pub cpu_fan_percent: u8,
     pub gpu_fan_percent: u8,
     pub platform_profile: PlatformProfile,
+    pub platform_profile_raw: Option<String>,
+    pub capabilities: Option<ControlCapabilities>,
     profile_sync: ProfileTelemetrySync,
     pub lighting: KeyboardLightingState,
+    last_applied_lighting: Vec<LightingApplyRequest>,
     pub lighting_error: Option<String>,
     pub platform: Option<PlatformState>,
     pub platform_busy: bool,
     pub platform_error: Option<String>,
     pub hardware_error: Option<String>,
     pub platform_revision: u64,
+    rear_logo_last_nonzero_brightness: u8,
     pub control_busy: bool,
     pub health: HealthState,
     pub status_message: String,
@@ -1936,17 +2256,21 @@ impl Default for AppState {
             cpu_fan_percent: 50,
             gpu_fan_percent: 50,
             platform_profile: PlatformProfile::Balanced,
+            platform_profile_raw: Some(PlatformProfile::Balanced.as_sysfs().to_string()),
+            capabilities: None,
             profile_sync: ProfileTelemetrySync::default(),
             lighting: KeyboardLightingState::default(),
+            last_applied_lighting: Vec::new(),
             lighting_error: None,
             platform: None,
             platform_busy: false,
             platform_error: None,
             hardware_error: None,
             platform_revision: 0,
+            rear_logo_last_nonzero_brightness: 100,
             control_busy: false,
             health: HealthState::Healthy,
-            status_message: "acer_wmi připojeno".into(),
+            status_message: "Ovládání Acer připojeno".into(),
             controls_enabled: true,
             telemetry_health: TelemetryHealth::Online,
             telemetry_error: None,
@@ -1960,19 +2284,21 @@ pub struct ManualFanRequest {
     pub gpu_percent: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyboardZonesRequest {
-    pub zones: [u32; 4],
-    pub brightness: u8,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LightingApplyRequest {
+    device_id: String,
+    state_readable: bool,
+    mode: ControlLightingMode,
+    brightness: u8,
+    speed: u8,
+    color: [u8; 3],
+    zone_colors: Vec<[u8; 3]>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyboardEffectRequest {
-    pub mode: u8,
-    pub speed: u8,
-    pub brightness: u8,
-    pub direction: u8,
-    pub color: u32,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LightingPowerRequest {
+    device_id: String,
+    enabled: bool,
 }
 
 #[component]
@@ -1982,15 +2308,15 @@ fn Dashboard(
     advanced_open: bool,
     on_fan_mode: EventHandler<FanMode>,
     on_manual_fans: EventHandler<ManualFanRequest>,
-    on_profile: EventHandler<PlatformProfile>,
-    on_keyboard_zones: EventHandler<KeyboardZonesRequest>,
-    on_keyboard_effect: EventHandler<KeyboardEffectRequest>,
-    on_keyboard_power: EventHandler<bool>,
+    on_profile: EventHandler<String>,
+    on_lighting: EventHandler<LightingApplyRequest>,
+    on_lighting_power: EventHandler<LightingPowerRequest>,
     on_platform: EventHandler<PlatformAction>,
     on_language: EventHandler<()>,
     on_refresh: EventHandler<()>,
     on_advanced: EventHandler<bool>,
 ) -> Element {
+    let mut docs_open = use_signal(|| false);
     let telemetry = state.telemetry.clone();
     let localized_control_status = localized_status(language, &state.status_message);
     let telemetry_status = match state.telemetry_health {
@@ -2043,6 +2369,7 @@ fn Dashboard(
                     control_busy: state.control_busy,
                     language,
                     advanced_open,
+                    on_info: move |_| docs_open.set(true),
                     on_language,
                     on_refresh,
                     on_advanced,
@@ -2050,7 +2377,12 @@ fn Dashboard(
 
                 QuickStrip {
                     telemetry: telemetry.clone(),
-                    profile: state.platform_profile,
+                    profile: profile_display_label(
+                        state.platform_profile_raw.as_deref(),
+                        state.platform_profile,
+                        state.capabilities.as_ref(),
+                        language,
+                    ),
                     language,
                 }
 
@@ -2061,7 +2393,10 @@ fn Dashboard(
                     cpu_fan_percent: state.cpu_fan_percent,
                     gpu_fan_percent: state.gpu_fan_percent,
                     platform_profile: state.platform_profile,
+                    platform_profile_raw: state.platform_profile_raw.clone(),
+                    capabilities: state.capabilities.clone(),
                     lighting: state.lighting,
+                    last_applied_lighting: state.last_applied_lighting,
                     lighting_error: state.lighting_error,
                     control_busy: state.control_busy,
                     controls_enabled: state.controls_enabled,
@@ -2070,9 +2405,8 @@ fn Dashboard(
                     on_fan_mode,
                     on_manual_fans,
                     on_profile,
-                    on_keyboard_zones,
-                    on_keyboard_effect,
-                    on_keyboard_power,
+                    on_lighting,
+                    on_lighting_power,
                 }
 
                 StatusBar {
@@ -2093,8 +2427,15 @@ fn Dashboard(
                     platform_busy: state.control_busy || state.platform_busy,
                     platform_error: state.platform_error,
                     platform_revision: state.platform_revision,
+                    rear_logo_last_nonzero_brightness: state.rear_logo_last_nonzero_brightness,
                     on_platform,
                 }
+            }
+
+            docs_modal::DocsModal {
+                open: docs_open(),
+                language,
+                on_close: move |_| docs_open.set(false),
             }
         }
     }
@@ -2109,6 +2450,7 @@ fn AppHeader(
     control_busy: bool,
     language: Language,
     advanced_open: bool,
+    on_info: EventHandler<()>,
     on_language: EventHandler<()>,
     on_refresh: EventHandler<()>,
     on_advanced: EventHandler<bool>,
@@ -2123,6 +2465,19 @@ fn AppHeader(
                 }
             }
             div { class: "header-actions",
+                button {
+                    class: "info-toggle",
+                    r#type: "button",
+                    title: tr(language, "O aplikaci a dokumentace", "About and documentation"),
+                    "aria-label": tr(language, "Otevřít informace a dokumentaci", "Open information and documentation"),
+                    onclick: move |_| {
+                        on_info.call(());
+                        let _ = document::eval(
+                            "requestAnimationFrame(() => document.querySelector('.docs-close')?.focus())",
+                        );
+                    },
+                    "?"
+                }
                 button {
                     class: "language-toggle",
                     r#type: "button",
@@ -2159,7 +2514,7 @@ fn AppHeader(
 }
 
 #[component]
-fn QuickStrip(telemetry: Telemetry, profile: PlatformProfile, language: Language) -> Element {
+fn QuickStrip(telemetry: Telemetry, profile: String, language: Language) -> Element {
     rsx! {
         section { class: "quick-strip", "aria-label": tr(language, "Systémová telemetrie", "System telemetry"),
             MetricPill {
@@ -2174,7 +2529,7 @@ fn QuickStrip(telemetry: Telemetry, profile: PlatformProfile, language: Language
             }
             div { class: "profile-pill",
                 span { {tr(language, "Profil", "Profile")} }
-                strong { "{profile.label(language)}" }
+                strong { "{profile}" }
             }
             MetricPill {
                 label: "GPU",
@@ -2183,7 +2538,11 @@ fn QuickStrip(telemetry: Telemetry, profile: PlatformProfile, language: Language
             }
             MetricPill {
                 label: tr(language, "ZÁTĚŽ", "LOAD"),
-                value: percent(telemetry.gpu_load_percent),
+                value: if telemetry.gpu_sleeping {
+                    tr(language, "Spí", "Sleeping").to_string()
+                } else {
+                    percent(telemetry.gpu_load_percent)
+                },
                 level: "neutral",
             }
         }
@@ -2200,6 +2559,7 @@ fn CoolingOverview(telemetry: Telemetry) -> Element {
                 max_rpm: telemetry.cpu_fan_max_rpm.max(1),
                 temperature_c: telemetry.cpu_temperature_c,
                 accent: "cyan",
+                secondary_rpm: None,
             }
             FanGauge {
                 kind: "GPU",
@@ -2207,6 +2567,7 @@ fn CoolingOverview(telemetry: Telemetry) -> Element {
                 max_rpm: telemetry.gpu_fan_max_rpm.max(1),
                 temperature_c: telemetry.gpu_temperature_c,
                 accent: "violet",
+                secondary_rpm: telemetry.gpu_aux_fan_rpm,
             }
         }
     }
@@ -2226,13 +2587,141 @@ fn keyboard_editor_readback(lighting: &KeyboardLightingState) -> Option<(u8, [u3
     Some((lighting.brightness, editor_colors))
 }
 
+fn fan_mode_supported(
+    capabilities: Option<&crate::control::ControlFanCapabilities>,
+    mode: FanMode,
+) -> bool {
+    capabilities.is_none_or(|capabilities| match mode {
+        FanMode::Auto => capabilities.auto,
+        FanMode::Manual => capabilities.manual,
+        FanMode::Maximum => capabilities.maximum,
+    })
+}
+
+fn rgb_bytes(color: u32) -> [u8; 3] {
+    [(color >> 16) as u8, (color >> 8) as u8, color as u8]
+}
+
+fn preferred_lighting_index(devices: &[ControlLightingDevice]) -> Option<usize> {
+    devices
+        .iter()
+        .position(|device| {
+            device.target == CapabilityLightingTarget::Keyboard
+                && device.backend == CapabilityLightingBackend::ZonedWmi
+                && device.state_readable
+        })
+        .or_else(|| {
+            devices
+                .iter()
+                .position(|device| device.target == CapabilityLightingTarget::Keyboard)
+        })
+}
+
+fn lighting_zone_draft(seed: &[u32]) -> Vec<u32> {
+    let defaults = KeyboardLightingState::default().zones;
+    (0..usize::from(MAX_LIGHTING_ZONES))
+        .map(|index| {
+            seed.get(index)
+                .copied()
+                .unwrap_or(defaults[index % defaults.len()])
+        })
+        .collect()
+}
+
+fn lighting_draft_for_device(
+    device: &ControlLightingDevice,
+    lighting: &KeyboardLightingState,
+    last_applied: &[LightingApplyRequest],
+) -> (u8, Vec<u32>) {
+    if device.state_readable
+        && lighting.available
+        && let Some((brightness, zones)) = keyboard_editor_readback(lighting)
+    {
+        return (brightness, lighting_zone_draft(&zones));
+    }
+
+    if let Some(request) = last_applied
+        .iter()
+        .find(|request| request.device_id == device.id)
+    {
+        let mut colors = request
+            .zone_colors
+            .iter()
+            .map(|color| u32::from_be_bytes([0, color[0], color[1], color[2]]))
+            .collect::<Vec<_>>();
+        if colors.is_empty() {
+            colors.push(u32::from_be_bytes([
+                0,
+                request.color[0],
+                request.color[1],
+                request.color[2],
+            ]));
+        }
+        return (request.brightness, lighting_zone_draft(&colors));
+    }
+
+    let defaults = KeyboardLightingState::default();
+    (defaults.brightness, lighting_zone_draft(&defaults.zones))
+}
+
+fn lighting_mode_visibility(modes: Option<ControlLightingModes>) -> (bool, bool, bool, bool) {
+    modes.map_or((true, true, true, true), |modes| {
+        (
+            modes.static_color,
+            modes.brightness,
+            modes.breathing,
+            modes.neon,
+        )
+    })
+}
+
+fn lighting_mode_number(mode: ControlLightingMode) -> u8 {
+    match mode {
+        ControlLightingMode::Off | ControlLightingMode::Static => 0,
+        ControlLightingMode::Breathing => 1,
+        ControlLightingMode::Neon => 2,
+    }
+}
+
+fn lighting_request(
+    device_id: String,
+    state_readable: bool,
+    mode: ControlLightingMode,
+    brightness: u8,
+    speed: u8,
+    color: u32,
+    zone_colors: &[u32],
+) -> LightingApplyRequest {
+    LightingApplyRequest {
+        device_id,
+        state_readable,
+        mode,
+        brightness,
+        speed,
+        color: rgb_bytes(color),
+        zone_colors: zone_colors.iter().copied().map(rgb_bytes).collect(),
+    }
+}
+
+fn lighting_target_label(target: CapabilityLightingTarget, language: Language) -> &'static str {
+    match target {
+        CapabilityLightingTarget::Keyboard => tr(language, "Klávesnice", "Keyboard"),
+        CapabilityLightingTarget::CoverLogo => tr(language, "Logo víka", "Cover logo"),
+        CapabilityLightingTarget::RearLogo => tr(language, "Zadní logo", "Rear logo"),
+        CapabilityLightingTarget::Lightbar => tr(language, "Světelná lišta", "Lightbar"),
+    }
+}
+
 #[component]
 fn ControlDock(
     fan_mode: FanMode,
     cpu_fan_percent: u8,
     gpu_fan_percent: u8,
     platform_profile: PlatformProfile,
+    platform_profile_raw: Option<String>,
+    capabilities: Option<ControlCapabilities>,
     lighting: KeyboardLightingState,
+    last_applied_lighting: Vec<LightingApplyRequest>,
     lighting_error: Option<String>,
     control_busy: bool,
     controls_enabled: bool,
@@ -2240,57 +2729,217 @@ fn ControlDock(
     language: Language,
     on_fan_mode: EventHandler<FanMode>,
     on_manual_fans: EventHandler<ManualFanRequest>,
-    on_profile: EventHandler<PlatformProfile>,
-    on_keyboard_zones: EventHandler<KeyboardZonesRequest>,
-    on_keyboard_effect: EventHandler<KeyboardEffectRequest>,
-    on_keyboard_power: EventHandler<bool>,
+    on_profile: EventHandler<String>,
+    on_lighting: EventHandler<LightingApplyRequest>,
+    on_lighting_power: EventHandler<LightingPowerRequest>,
 ) -> Element {
+    let mut lighting_devices = capabilities
+        .as_ref()
+        .map(|capabilities| capabilities.lighting.clone())
+        .unwrap_or_default();
+    if let Some(preferred) = preferred_lighting_index(&lighting_devices)
+        && preferred != 0
+    {
+        lighting_devices.swap(0, preferred);
+    }
+
     let mut cpu_draft = use_signal(move || cpu_fan_percent);
     let mut gpu_draft = use_signal(move || gpu_fan_percent);
     let initial_manual = fan_mode == FanMode::Manual;
     let mut fan_editor_open = use_signal(move || initial_manual);
+    let mut observed_fan_mode = use_signal(move || fan_mode);
+    if *observed_fan_mode.peek() != fan_mode {
+        let previous = *observed_fan_mode.peek();
+        observed_fan_mode.set(fan_mode);
+        if fan_mode == FanMode::Manual {
+            cpu_draft.set(cpu_fan_percent.clamp(20, 100));
+            gpu_draft.set(gpu_fan_percent.clamp(20, 100));
+        }
+        if previous == FanMode::Manual && fan_mode != FanMode::Manual {
+            fan_editor_open.set(false);
+        }
+    }
     let mut dock_tab = use_signal(DockTab::default);
-    let initial_brightness = lighting.brightness;
+    let mut selected_lighting_index = use_signal(|| 0_usize);
+    let selected_lighting = selected_lighting_index().min(lighting_devices.len().saturating_sub(1));
+    let keyboard_device = lighting_devices
+        .get(selected_lighting)
+        .or_else(|| lighting_devices.first())
+        .cloned();
+    let zone_count = keyboard_device
+        .as_ref()
+        .map_or(4, |device| device.zones.clamp(1, MAX_LIGHTING_ZONES));
+    let initial_brightness = if lighting.brightness == 0 {
+        KeyboardLightingState::default().brightness.max(1)
+    } else {
+        lighting.brightness
+    };
     let mut keyboard_brightness = use_signal(move || initial_brightness);
-    let initial_colors = lighting.zones;
-    let mut zone1 = use_signal(move || initial_colors[0]);
-    let mut zone2 = use_signal(move || initial_colors[1]);
-    let mut zone3 = use_signal(move || initial_colors[2]);
-    let mut zone4 = use_signal(move || initial_colors[3]);
-    let lighting_editor_readback = keyboard_editor_readback(&lighting);
-    use_effect(use_reactive(
-        (&lighting_editor_readback,),
-        move |(readback,)| {
-            let Some((brightness, zones)) = readback else {
-                return;
-            };
-            keyboard_brightness.set(brightness);
-            zone1.set(zones[0]);
-            zone2.set(zones[1]);
-            zone3.set(zones[2]);
-            zone4.set(zones[3]);
-        },
-    ));
+    let initial_colors = lighting_zone_draft(&lighting.zones);
+    let mut zone_colors = use_signal(move || initial_colors);
+    let mut lighting_draft_dirty = use_signal(|| false);
+    let lighting_editor_readback = keyboard_device.as_ref().and_then(|device| {
+        (device.state_readable && lighting.available)
+            .then(|| keyboard_editor_readback(&lighting))
+            .flatten()
+            .map(|(brightness, zones)| (device.id.clone(), brightness, zones))
+    });
+    let mut observed_lighting_readback = use_signal(|| None::<(String, u8, [u32; 4])>);
+    if *observed_lighting_readback.peek() != lighting_editor_readback {
+        observed_lighting_readback.set(lighting_editor_readback.clone());
+        if let Some((_, brightness, zones)) = lighting_editor_readback {
+            if brightness > 0 {
+                keyboard_brightness.set(brightness);
+            }
+            zone_colors.set(lighting_zone_draft(&zones));
+            lighting_draft_dirty.set(false);
+        }
+    }
 
-    let manual = fan_editor_open();
+    let manual_supported = fan_mode_supported(
+        capabilities.as_ref().map(|capabilities| &capabilities.fans),
+        FanMode::Manual,
+    );
+    let manual = manual_supported && (fan_mode == FanMode::Manual || fan_editor_open());
     let selected_fan_mode = if manual { FanMode::Manual } else { fan_mode };
     let enabled = controls_enabled && !control_busy && health != HealthState::Applying;
+    let mut profile_choices = capabilities.as_ref().map_or_else(
+        || {
+            PlatformProfile::ALL
+                .into_iter()
+                .map(|profile| ControlProfileChoice {
+                    raw: profile.as_sysfs().to_string(),
+                    label: profile.label(language).to_string(),
+                    selectable: true,
+                })
+                .collect::<Vec<_>>()
+        },
+        |capabilities| capabilities.profiles.choices.clone(),
+    );
+    let reference_model = capabilities
+        .as_ref()
+        .is_none_or(|capabilities| capabilities.reference_model);
+    for choice in &mut profile_choices {
+        if let Some(label) = profile_label_for_machine(&choice.raw, language, reference_model) {
+            choice.label = label.to_string();
+        }
+    }
+    let selected_profile_raw =
+        platform_profile_raw.unwrap_or_else(|| platform_profile.as_sysfs().to_string());
+    let profile_count = profile_choices.len().max(1);
+    let profile_source_hint = match capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.profiles.backend)
+    {
+        Some(CapabilityProfileBackend::Kernel) => tr(
+            language,
+            "Volby profilů poskytuje živé rozhraní Linux kernelu.",
+            "Profile choices come from the live Linux kernel interface.",
+        ),
+        Some(CapabilityProfileBackend::AcerGamingWmi) => tr(
+            language,
+            "Známé příkazy Acer Gaming-WMI; každá změna se ověřuje zpětným čtením.",
+            "Known Acer Gaming-WMI commands; every change is verified by readback.",
+        ),
+        None => tr(
+            language,
+            "Firmware profily nejsou dostupné.",
+            "Firmware profiles are unavailable.",
+        ),
+    };
+    let fan_capabilities = capabilities
+        .as_ref()
+        .map(|capabilities| capabilities.fans.clone());
+    let fan_control_available = fan_capabilities
+        .as_ref()
+        .is_none_or(|capabilities| capabilities.backend.is_some());
+    let supported_fan_modes = FanMode::ALL
+        .into_iter()
+        .filter(|mode| fan_mode_supported(fan_capabilities.as_ref(), *mode))
+        .collect::<Vec<_>>();
+    let lighting_available = !lighting_devices.is_empty();
+    let lighting_drafts = lighting_devices
+        .iter()
+        .map(|device| lighting_draft_for_device(device, &lighting, &last_applied_lighting))
+        .collect::<Vec<_>>();
+    let dock_column_count = 1 + lighting_devices.len().max(1);
+    let lighting_modes = keyboard_device.as_ref().map(|device| device.modes);
+    let (show_static, show_brightness, show_breathing, show_neon) =
+        lighting_mode_visibility(lighting_modes);
+    let lighting_action_count =
+        usize::from(show_static) + usize::from(show_breathing) + usize::from(show_neon);
+    let lighting_device_id = keyboard_device.as_ref().map(|device| device.id.clone());
+    let power_on_device = lighting_device_id.clone();
+    let power_off_device = lighting_device_id.clone();
+    let auto_color_device = lighting_device_id.clone();
+    let static_device = lighting_device_id.clone();
+    let breathing_device = lighting_device_id.clone();
+    let neon_device = lighting_device_id;
+    let lighting_control_label = keyboard_device
+        .as_ref()
+        .map_or(tr(language, "Podsvícení", "Backlight"), |device| {
+            lighting_target_label(device.target, language)
+        });
+    let lighting_state_readable = keyboard_device
+        .as_ref()
+        .is_none_or(|device| device.state_readable && lighting.available);
+    let typed_power_available = keyboard_device.as_ref().is_some_and(|device| {
+        device.backend == CapabilityLightingBackend::ZonedWmi
+            && device.target == CapabilityLightingTarget::Keyboard
+            && device.state_readable
+    });
+    let selected_last_applied = keyboard_device.as_ref().and_then(|device| {
+        last_applied_lighting
+            .iter()
+            .find(|request| request.device_id == device.id)
+    });
+    let lighting_state_last_applied = selected_last_applied.is_some();
+    let lighting_state_known = lighting_state_readable || lighting_state_last_applied;
+    let displayed_lighting_power = if lighting_state_readable {
+        lighting.powered
+    } else {
+        selected_last_applied.is_some_and(|request| request.mode != ControlLightingMode::Off)
+    };
+    let displayed_lighting_mode = if lighting_state_readable {
+        lighting.mode
+    } else {
+        selected_last_applied
+            .map(|request| lighting_mode_number(request.mode))
+            .unwrap_or_default()
+    };
+    let lighting_state_label = if lighting_state_readable {
+        tr(language, "Stav z firmware", "Firmware state")
+    } else if lighting_state_last_applied {
+        tr(language, "Naposledy použito", "Last applied")
+    } else {
+        tr(language, "Stav neznámý", "State unknown")
+    };
 
     rsx! {
         section { class: "control-dock", "aria-label": tr(language, "Ovládací centrum", "Control center"),
-            div { class: "profile-switch", "aria-label": tr(language, "Výkonnostní profil Acer", "Acer performance profile"),
-                for profile in PlatformProfile::ALL {
+            div {
+                class: "profile-switch",
+                style: "grid-template-columns:repeat({profile_count},minmax(0,1fr))",
+                title: profile_source_hint,
+                "aria-label": tr(language, "Výkonnostní profil Acer", "Acer performance profile"),
+                for choice in profile_choices {
                     button {
-                        class: if platform_profile == profile { "profile active" } else { "profile" },
+                        class: if selected_profile_raw == choice.raw { "profile active" } else { "profile" },
                         r#type: "button",
-                        disabled: !enabled,
-                        onclick: move |_| on_profile.call(profile),
-                        "{profile.label(language)}"
+                        disabled: !enabled || !choice.selectable,
+                        onclick: {
+                            let raw = choice.raw.clone();
+                            move |_| on_profile.call(raw.clone())
+                        },
+                        {choice.label.clone()}
                     }
                 }
             }
 
-            div { class: "dock-tabs", role: "tablist",
+            div {
+                class: "dock-tabs",
+                style: "grid-template-columns:repeat({dock_column_count},minmax(0,1fr))",
+                role: "tablist",
                 button {
                     class: if dock_tab() == DockTab::Fans { "dock-tab active" } else { "dock-tab" },
                     r#type: "button",
@@ -2299,19 +2948,41 @@ fn ControlDock(
                     onclick: move |_| dock_tab.set(DockTab::Fans),
                     {tr(language, "Ventilátory", "Fans")}
                 }
-                button {
-                    class: if dock_tab() == DockTab::Keyboard { "dock-tab active" } else { "dock-tab" },
-                    r#type: "button",
-                    role: "tab",
-                    "aria-selected": dock_tab() == DockTab::Keyboard,
-                    disabled: !lighting.available,
-                    title: lighting_error.as_deref().unwrap_or(if lighting.available {
-                        tr(language, "RGB klávesnice", "RGB keyboard")
-                    } else {
-                        tr(language, "RGB modul není dostupný", "RGB module is unavailable")
-                    }),
-                    onclick: move |_| dock_tab.set(DockTab::Keyboard),
-                    {tr(language, "Klávesnice", "Keyboard")}
+                if lighting_devices.is_empty() {
+                    button {
+                        class: if dock_tab() == DockTab::Keyboard { "dock-tab active" } else { "dock-tab" },
+                        r#type: "button",
+                        role: "tab",
+                        "aria-selected": dock_tab() == DockTab::Keyboard,
+                        disabled: !lighting_available,
+                        title: lighting_error.as_deref().unwrap_or(if lighting_available {
+                            tr(language, "RGB klávesnice", "RGB keyboard")
+                        } else {
+                            tr(language, "RGB modul není dostupný", "RGB module is unavailable")
+                        }),
+                        onclick: move |_| dock_tab.set(DockTab::Keyboard),
+                        {tr(language, "Klávesnice", "Keyboard")}
+                    }
+                } else {
+                    for (index, device) in lighting_devices.iter().enumerate() {
+                        button {
+                            class: if dock_tab() == DockTab::Keyboard && selected_lighting == index { "dock-tab active" } else { "dock-tab" },
+                            r#type: "button",
+                            role: "tab",
+                            "aria-selected": dock_tab() == DockTab::Keyboard && selected_lighting == index,
+                            onclick: {
+                                let (draft_brightness, draft_colors) = lighting_drafts[index].clone();
+                                move |_| {
+                                    keyboard_brightness.set(draft_brightness);
+                                    zone_colors.set(draft_colors.clone());
+                                    lighting_draft_dirty.set(false);
+                                    selected_lighting_index.set(index);
+                                    dock_tab.set(DockTab::Keyboard);
+                                }
+                            },
+                            {lighting_target_label(device.target, language)}
+                        }
+                    }
                 }
             }
 
@@ -2319,106 +2990,219 @@ fn ControlDock(
                 if dock_tab() == DockTab::Keyboard {
                     div { class: "keyboard-panel",
                         div { class: "lighting-power", "aria-label": tr(language, "Napájení podsvícení klávesnice", "Keyboard backlight power"),
-                            span { {tr(language, "Podsvícení", "Backlight")} }
-                            button {
-                                class: if lighting.powered { "active" } else { "" },
-                                r#type: "button",
-                                disabled: !enabled,
-                                onclick: move |_| on_keyboard_power.call(true),
-                                {tr(language, "Zap", "On")}
+                            div { class: "lighting-label",
+                                span { "{lighting_control_label}" }
+                                small { "{lighting_state_label}" }
                             }
-                            button {
-                                class: if !lighting.powered { "active" } else { "" },
-                                r#type: "button",
-                                disabled: !enabled,
-                                onclick: move |_| on_keyboard_power.call(false),
-                                {tr(language, "Vyp", "Off")}
+                            if show_static {
+                                button {
+                                    class: if lighting_state_known && displayed_lighting_power { "active" } else { "" },
+                                    r#type: "button",
+                                    disabled: !enabled,
+                                    onclick: move |_| {
+                                        if let Some(device_id) = power_on_device.clone() {
+                                            if typed_power_available && !lighting_draft_dirty() {
+                                                on_lighting_power.call(LightingPowerRequest {
+                                                    device_id,
+                                                    enabled: true,
+                                                });
+                                            } else {
+                                                let colors = zone_colors.read();
+                                                on_lighting.call(lighting_request(
+                                                    device_id,
+                                                    lighting_state_readable,
+                                                    ControlLightingMode::Static,
+                                                    keyboard_brightness(),
+                                                    0,
+                                                    colors[0],
+                                                    &colors[..usize::from(zone_count)],
+                                                ));
+                                            }
+                                        }
+                                    },
+                                    {tr(language, "Zap", "On")}
+                                }
+                                button {
+                                    class: if lighting_state_known && !displayed_lighting_power { "active" } else { "" },
+                                    r#type: "button",
+                                    disabled: !enabled,
+                                    onclick: move |_| {
+                                        if let Some(device_id) = power_off_device.clone() {
+                                            if typed_power_available {
+                                                on_lighting_power.call(LightingPowerRequest {
+                                                    device_id,
+                                                    enabled: false,
+                                                });
+                                            } else {
+                                                let colors = zone_colors.read();
+                                                on_lighting.call(lighting_request(
+                                                    device_id,
+                                                    lighting_state_readable,
+                                                    ControlLightingMode::Off,
+                                                    keyboard_brightness(),
+                                                    0,
+                                                    colors[0],
+                                                    &[],
+                                                ));
+                                            }
+                                        }
+                                    },
+                                    {tr(language, "Vyp", "Off")}
+                                }
                             }
                         }
-                        div { class: "zone-colors",
-                            ColorInput { language, label: "1", value: zone1(), on_change: move |value| zone1.set(value) }
-                            ColorInput { language, label: "2", value: zone2(), on_change: move |value| zone2.set(value) }
-                            ColorInput { language, label: "3", value: zone3(), on_change: move |value| zone3.set(value) }
-                            ColorInput { language, label: "4", value: zone4(), on_change: move |value| zone4.set(value) }
-                        }
-                        label { class: "light-slider",
-                            span { {tr(language, "Jas", "Brightness")} }
-                            input {
-                                r#type: "range",
-                                min: "0",
-                                max: "100",
-                                step: "1",
-                                value: "{keyboard_brightness}",
-                                style: "--value:{keyboard_brightness}%",
-                                disabled: !enabled,
-                                oninput: move |event| {
-                                    if let Ok(value) = event.value().parse::<u8>() {
-                                        keyboard_brightness.set(value.min(100));
+                        if show_static {
+                            div {
+                                class: "zone-colors",
+                                style: "grid-template-columns:repeat({zone_count},minmax(34px,1fr))",
+                                for zone_index in 0..usize::from(zone_count) {
+                                    ColorInput {
+                                        key: "{zone_index}",
+                                        language,
+                                        label: zone_index + 1,
+                                        value: zone_colors.read()[zone_index],
+                                        on_change: move |value| zone_colors.write()[zone_index] = value,
+                                        on_commit: {
+                                            let device_id = auto_color_device.clone();
+                                            move |value| {
+                                                let mut colors = zone_colors.peek().clone();
+                                                colors[zone_index] = value;
+                                                zone_colors.set(colors.clone());
+                                                if enabled && displayed_lighting_power
+                                                    && let Some(device_id) = device_id.clone()
+                                                {
+                                                    on_lighting.call(lighting_request(
+                                                        device_id,
+                                                        lighting_state_readable,
+                                                        ControlLightingMode::Static,
+                                                        keyboard_brightness(),
+                                                        0,
+                                                        colors[0],
+                                                        &colors[..usize::from(zone_count)],
+                                                    ));
+                                                } else if !displayed_lighting_power {
+                                                    lighting_draft_dirty.set(true);
+                                                }
+                                            }
+                                        },
                                     }
-                                },
+                                }
                             }
-                            strong { "{keyboard_brightness}%" }
                         }
-                        div { class: "lighting-actions",
-                            button {
-                                class: if lighting.mode == 0 { "active" } else { "" },
-                                r#type: "button",
-                                disabled: !enabled,
-                                onclick: move |_| on_keyboard_zones.call(KeyboardZonesRequest {
-                                    zones: [zone1(), zone2(), zone3(), zone4()],
-                                    brightness: keyboard_brightness(),
-                                }),
-                                {tr(language, "Statické", "Static")}
+                        if show_brightness {
+                            label { class: "light-slider",
+                                span { {tr(language, "Jas", "Brightness")} }
+                                input {
+                                    r#type: "range",
+                                    min: "1",
+                                    max: "100",
+                                    step: "1",
+                                    value: "{keyboard_brightness}",
+                                    style: "--value:{keyboard_brightness}%",
+                                    disabled: !enabled,
+                                    oninput: move |event| {
+                                        if let Ok(value) = event.value().parse::<u8>() {
+                                            keyboard_brightness.set(value.min(100));
+                                            lighting_draft_dirty.set(true);
+                                        }
+                                    },
+                                }
+                                strong { "{keyboard_brightness}%" }
                             }
-                            button {
-                                class: if lighting.mode == 1 { "active" } else { "" },
-                                r#type: "button",
-                                disabled: !enabled,
-                                onclick: move |_| on_keyboard_effect.call(KeyboardEffectRequest {
-                                    mode: 1, speed: 0, brightness: keyboard_brightness(), direction: 0, color: zone1(),
-                                }),
-                                {tr(language, "Dech", "Breathing")}
-                            }
-                            button {
-                                class: if lighting.mode == 3 { "active" } else { "" },
-                                r#type: "button",
-                                disabled: !enabled,
-                                onclick: move |_| on_keyboard_effect.call(KeyboardEffectRequest {
-                                    mode: 3, speed: 5, brightness: keyboard_brightness(), direction: 2, color: 0,
-                                }),
-                                {tr(language, "Vlna", "Wave")}
-                            }
-                            button {
-                                class: if lighting.mode == 4 { "active" } else { "" },
-                                r#type: "button",
-                                disabled: !enabled,
-                                onclick: move |_| on_keyboard_effect.call(KeyboardEffectRequest {
-                                    mode: 4, speed: 5, brightness: keyboard_brightness(), direction: 2, color: zone1(),
-                                }),
-                                {tr(language, "Posun", "Shifting")}
+                        }
+                        if lighting_action_count > 0 {
+                            div {
+                                class: "lighting-actions",
+                                style: "grid-template-columns:repeat({lighting_action_count},minmax(0,1fr))",
+                                if show_static {
+                                    button {
+                                        class: if lighting_state_known && displayed_lighting_mode == 0 { "active" } else { "" },
+                                        r#type: "button",
+                                        disabled: !enabled,
+                                        onclick: move |_| {
+                                            let colors = zone_colors.read();
+                                            if let Some(device_id) = static_device.clone() {
+                                                on_lighting.call(lighting_request(
+                                                    device_id,
+                                                    lighting_state_readable,
+                                                    ControlLightingMode::Static,
+                                                    keyboard_brightness(),
+                                                    0,
+                                                    colors[0],
+                                                    &colors[..usize::from(zone_count)],
+                                                ));
+                                            }
+                                        },
+                                        {tr(language, "Statické", "Static")}
+                                    }
+                                }
+                                if show_breathing {
+                                    button {
+                                        class: if lighting_state_known && displayed_lighting_mode == 1 { "active" } else { "" },
+                                        r#type: "button",
+                                        disabled: !enabled,
+                                        onclick: move |_| {
+                                            let color = zone_colors.read()[0];
+                                            if let Some(device_id) = breathing_device.clone() {
+                                                on_lighting.call(lighting_request(
+                                                    device_id,
+                                                    lighting_state_readable,
+                                                    ControlLightingMode::Breathing,
+                                                    keyboard_brightness(),
+                                                    0,
+                                                    color,
+                                                    &[],
+                                                ));
+                                            }
+                                        },
+                                        {tr(language, "Dech", "Breathing")}
+                                    }
+                                }
+                                if show_neon {
+                                    button {
+                                        class: if lighting_state_known && displayed_lighting_mode == 2 { "active" } else { "" },
+                                        r#type: "button",
+                                        disabled: !enabled,
+                                        onclick: move |_| {
+                                            let color = zone_colors.read()[0];
+                                            if let Some(device_id) = neon_device.clone() {
+                                                on_lighting.call(lighting_request(
+                                                    device_id,
+                                                    lighting_state_readable,
+                                                    ControlLightingMode::Neon,
+                                                    keyboard_brightness(),
+                                                    5,
+                                                    color,
+                                                    &[],
+                                                ));
+                                            }
+                                        },
+                                        {tr(language, "Neon", "Neon")}
+                                    }
+                                }
                             }
                         }
                     }
                 } else {
                     div { class: if manual { "fan-panel manual" } else { "fan-panel" },
-                        div { class: "mode-switch", "aria-label": tr(language, "Režim ventilátorů", "Fan mode"),
-                            for mode in FanMode::ALL {
-                                button {
-                                    class: if mode == selected_fan_mode { "mode active" } else { "mode" },
-                                    r#type: "button",
-                                    disabled: !enabled,
-                                    title: "{mode.hint(language)}",
-                                    onclick: move |_| {
-                                        if mode == FanMode::Manual {
-                                            cpu_draft.set(cpu_fan_percent.clamp(20, 100));
-                                            gpu_draft.set(gpu_fan_percent.clamp(20, 100));
-                                            fan_editor_open.set(true);
-                                        } else {
-                                            fan_editor_open.set(false);
-                                            on_fan_mode.call(mode);
-                                        }
-                                    },
-                                    "{mode.label(language)}"
+                        if fan_control_available {
+                            div { class: "mode-switch", "aria-label": tr(language, "Režim ventilátorů", "Fan mode"),
+                                for mode in supported_fan_modes {
+                                    button {
+                                        class: if mode == selected_fan_mode { "mode active" } else { "mode" },
+                                        r#type: "button",
+                                        disabled: !enabled,
+                                        title: "{mode.hint(language)}",
+                                        onclick: move |_| {
+                                            if mode == FanMode::Manual {
+                                                fan_editor_open.set(true);
+                                            } else {
+                                                fan_editor_open.set(false);
+                                                on_fan_mode.call(mode);
+                                            }
+                                        },
+                                        "{mode.label(language)}"
+                                    }
                                 }
                             }
                         }
@@ -2440,11 +3224,14 @@ fn ControlDock(
                                 button {
                                     class: "apply-button",
                                     r#type: "button",
-                                    disabled: !enabled,
-                                    onclick: move |_| on_manual_fans.call(ManualFanRequest {
-                                        cpu_percent: cpu_draft(),
-                                        gpu_percent: gpu_draft(),
-                                    }),
+                                    disabled: !enabled || !manual_supported,
+                                    onclick: move |_| {
+                                        fan_editor_open.set(false);
+                                        on_manual_fans.call(ManualFanRequest {
+                                            cpu_percent: cpu_draft(),
+                                            gpu_percent: gpu_draft(),
+                                        });
+                                    },
                                     {tr(language, "Použít", "Apply")}
                                 }
                             }
@@ -2455,9 +3242,17 @@ fn ControlDock(
                                 } else {
                                     "fan-mode-summary"
                                 },
-                                span { class: "fan-summary-dot" }
+                                if fan_control_available {
+                                    span { class: "fan-summary-dot" }
+                                }
                                 strong {
-                                    if selected_fan_mode == FanMode::Maximum {
+                                    if !fan_control_available {
+                                        {tr(
+                                            language,
+                                            "Řízení ventilátorů není dostupné",
+                                            "Fan control unavailable",
+                                        )}
+                                    } else if selected_fan_mode == FanMode::Maximum {
                                         {tr(
                                             language,
                                             "Vybrány maximální otáčky ventilátorů",
@@ -2563,6 +3358,7 @@ fn AdvancedPanel(
     platform_busy: bool,
     platform_error: Option<String>,
     platform_revision: u64,
+    rear_logo_last_nonzero_brightness: u8,
     on_platform: EventHandler<PlatformAction>,
 ) -> Element {
     let mut tab = use_signal(AdvancedTab::default);
@@ -2583,24 +3379,63 @@ fn AdvancedPanel(
     let history_seconds = history.len.max(1);
     let throttle = clock_event_label(telemetry.gpu_clock_event_reasons, language);
     let telemetry_error = telemetry.gpu_error.as_deref();
-    let throttle_class = if telemetry_error.is_some() {
+    let throttle_class = if telemetry.gpu_sleeping {
+        "throttle-state"
+    } else if telemetry_error.is_some() {
         "throttle-state telemetry-error"
     } else if has_real_throttle(telemetry.gpu_clock_event_reasons) {
         "throttle-state active"
     } else {
         "throttle-state"
     };
-    let throttle_label = if telemetry_error.is_some() {
+    let throttle_label = if telemetry.gpu_sleeping || telemetry_error.is_some() {
         "NVIDIA"
     } else {
         tr(language, "Důvody omezení taktu", "Clock / throttle reasons")
     };
-    let throttle_summary = if telemetry_error.is_some() {
+    let throttle_summary = if telemetry.gpu_sleeping {
+        tr(language, "Spí", "Sleeping").to_string()
+    } else if telemetry_error.is_some() {
         tr(language, "Chyba čtení", "Readback error").to_string()
     } else {
         throttle
     };
-    let throttle_title = telemetry_error.unwrap_or("");
+    let throttle_title = if telemetry.gpu_sleeping {
+        "RTD3"
+    } else {
+        telemetry_error.unwrap_or("")
+    };
+    let gpu_workload = if telemetry.gpu_sleeping {
+        tr(language, "Spí", "Sleeping").to_string()
+    } else {
+        percent(telemetry.gpu_load_percent)
+    };
+    let gpu_workload_detail = if telemetry.gpu_sleeping {
+        format!("{} · RTD3", temperature(telemetry.gpu_temperature_c))
+    } else {
+        format!(
+            "{} · {}",
+            temperature(telemetry.gpu_temperature_c),
+            optional_text(telemetry.gpu_pstate.as_deref())
+        )
+    };
+    let cooling_detail = if telemetry.additional_fans.is_empty() {
+        telemetry.gpu_aux_fan_rpm.map_or_else(
+            || "CPU / GPU".to_string(),
+            |rpm| format!("CPU / GPU · F3 {rpm} RPM"),
+        )
+    } else {
+        let additional = telemetry
+            .additional_fans
+            .iter()
+            .map(|(label, rpm)| format!("{label} {rpm}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        match telemetry.gpu_aux_fan_rpm {
+            Some(rpm) => format!("F3 {rpm} · {additional}"),
+            None => additional,
+        }
+    };
 
     rsx! {
         aside { class: "advanced-panel", "aria-label": tr(language, "Rozšířené systémové informace", "Advanced system information"),
@@ -2645,8 +3480,8 @@ fn AdvancedPanel(
                 }
                 AdvancedMetric {
                     label: tr(language, "Zátěž GPU", "GPU workload"),
-                    value: percent(telemetry.gpu_load_percent),
-                    detail: format!("{} · {}", temperature(telemetry.gpu_temperature_c), optional_text(telemetry.gpu_pstate.as_deref())),
+                    value: gpu_workload,
+                    detail: gpu_workload_detail,
                 }
                 AdvancedMetric {
                     label: "VRAM",
@@ -2656,12 +3491,12 @@ fn AdvancedPanel(
                 AdvancedMetric {
                     label: "GFX / SM",
                     value: frequency(telemetry.gpu_graphics_clock_mhz),
-                    detail: format!("VF/GPC {:+} MHz", telemetry.gpu_core_offset_mhz.unwrap_or_default()),
+                    detail: gpu_offset_detail("VF/GPC", telemetry.gpu_core_offset_mhz),
                 }
                 AdvancedMetric {
                     label: tr(language, "Takt VRAM", "VRAM clock"),
                     value: frequency(telemetry.gpu_memory_clock_mhz),
-                    detail: format!("VF MEM {:+} MHz", telemetry.gpu_memory_offset_mhz.unwrap_or_default()),
+                    detail: gpu_offset_detail("VF MEM", telemetry.gpu_memory_offset_mhz),
                 }
                 AdvancedMetric {
                     label: tr(language, "Příkon GPU", "GPU power"),
@@ -2671,7 +3506,7 @@ fn AdvancedPanel(
                 AdvancedMetric {
                     label: tr(language, "Chlazení", "Cooling"),
                     value: format!("{}/{} RPM", optional_u32(telemetry.cpu_fan_rpm), optional_u32(telemetry.gpu_fan_rpm)),
-                    detail: "CPU / GPU".to_string(),
+                    detail: cooling_detail,
                 }
                 }
 
@@ -2746,7 +3581,7 @@ fn AdvancedPanel(
                 div { class: throttle_class, title: "{throttle_title}",
                 span { "{throttle_label}" }
                 strong { "{throttle_summary}" }
-                if telemetry_error.is_none() {
+                if telemetry_error.is_none() && !telemetry.gpu_sleeping {
                     code { "0x{telemetry.gpu_clock_event_reasons.unwrap_or_default():016x}" }
                 }
                 }
@@ -2763,6 +3598,7 @@ fn AdvancedPanel(
                     usb_power_online: telemetry.usb_power_online,
                     busy: platform_busy,
                     error: platform_error,
+                    last_nonzero_logo_brightness: rear_logo_last_nonzero_brightness,
                     language,
                     on_action: move |action| on_platform.call(action),
                 }
@@ -2977,6 +3813,17 @@ fn hardware_capacity(value: Option<u64>) -> String {
     )
 }
 
+fn rear_logo_state(enabled: bool, brightness: u8, color: u32) -> RearLogoState {
+    RearLogoState {
+        enabled,
+        // PHN16-72 keeps the physical rear logo lit when only its logical
+        // enable flag is cleared. Brightness zero is the effective hardware
+        // off state; keep that detail behind the typed UI request.
+        brightness: if enabled { brightness } else { 0 },
+        color: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
+    }
+}
+
 #[component]
 fn PlatformAdvanced(
     state: Option<PlatformState>,
@@ -2986,6 +3833,7 @@ fn PlatformAdvanced(
     usb_power_online: Option<bool>,
     busy: bool,
     error: Option<String>,
+    last_nonzero_logo_brightness: u8,
     language: Language,
     on_action: EventHandler<PlatformAction>,
 ) -> Element {
@@ -3017,8 +3865,13 @@ fn PlatformAdvanced(
         brightness: 100,
         color: [0x5b, 0x6e, 0xff],
     });
-    let mut logo_enabled = use_signal(move || initial_logo.enabled);
-    let mut logo_brightness = use_signal(move || initial_logo.brightness);
+    let logo_enabled = use_signal(move || initial_logo.enabled);
+    let initial_logo_brightness = if initial_logo.brightness == 0 {
+        last_nonzero_logo_brightness.clamp(1, 100)
+    } else {
+        initial_logo.brightness
+    };
+    let mut logo_brightness = use_signal(move || initial_logo_brightness);
     let initial_logo_color = u32::from_be_bytes([
         0,
         initial_logo.color[0],
@@ -3189,14 +4042,28 @@ fn PlatformAdvanced(
                     div { class: "binary-buttons",
                         button {
                             class: if logo_enabled() { "active" } else { "" },
+                            r#type: "button",
                             disabled: busy || state.rear_logo.is_none(),
-                            onclick: move |_| logo_enabled.set(true),
+                            onclick: move |_| {
+                                on_action.call(PlatformAction::RearLogo(rear_logo_state(
+                                    true,
+                                    logo_brightness(),
+                                    logo_color(),
+                                )));
+                            },
                             {tr(language, "Zap", "On")}
                         }
                         button {
                             class: if !logo_enabled() { "active" } else { "" },
+                            r#type: "button",
                             disabled: busy || state.rear_logo.is_none(),
-                            onclick: move |_| logo_enabled.set(false),
+                            onclick: move |_| {
+                                on_action.call(PlatformAction::RearLogo(rear_logo_state(
+                                    false,
+                                    logo_brightness(),
+                                    logo_color(),
+                                )));
+                            },
                             {tr(language, "Vyp", "Off")}
                         }
                     }
@@ -3216,12 +4083,25 @@ fn PlatformAdvanced(
                                     logo_color.set(value);
                                 }
                             },
+                            onchange: move |event| {
+                                let value = event.value();
+                                if let Some(value) = parse_color_value(&value) {
+                                    logo_color.set(value);
+                                    if logo_enabled() && !busy {
+                                        on_action.call(PlatformAction::RearLogo(rear_logo_state(
+                                            true,
+                                            logo_brightness(),
+                                            value,
+                                        )));
+                                    }
+                                }
+                            },
                         }
                     }
                     label { class: "logo-brightness",
                         span { {tr(language, "Jas", "Brightness")} }
                         input {
-                            r#type: "range", min: "0", max: "100", step: "1",
+                            r#type: "range", min: "1", max: "100", step: "1",
                             value: "{logo_brightness}",
                             style: "--value:{logo_brightness}%",
                             disabled: busy || state.rear_logo.is_none(),
@@ -3235,18 +4115,13 @@ fn PlatformAdvanced(
                     }
                     button {
                         class: "apply-button",
-                        disabled: busy || state.rear_logo.is_none(),
+                        disabled: busy || state.rear_logo.is_none() || !logo_enabled(),
                         onclick: move |_| {
-                            let color = logo_color();
-                            on_action.call(PlatformAction::RearLogo(RearLogoState {
-                                enabled: logo_enabled(),
-                                brightness: logo_brightness(),
-                                color: [
-                                    (color >> 16) as u8,
-                                    (color >> 8) as u8,
-                                    color as u8,
-                                ],
-                            }));
+                            on_action.call(PlatformAction::RearLogo(rear_logo_state(
+                                logo_enabled(),
+                                logo_brightness(),
+                                logo_color(),
+                            )));
                         },
                         {tr(language, "Použít", "Apply")}
                     }
@@ -3358,7 +4233,7 @@ fn AdvancedMetric(label: &'static str, value: String, detail: String) -> Element
         article { class: "advanced-metric",
             span { "{label}" }
             strong { "{value}" }
-            small { "{detail}" }
+            small { title: "{detail}", "{detail}" }
         }
     }
 }
@@ -3443,6 +4318,7 @@ fn FanGauge(
     max_rpm: u32,
     temperature_c: Option<f32>,
     accent: &'static str,
+    secondary_rpm: Option<u32>,
 ) -> Element {
     let ratio = rpm.unwrap_or_default() as f32 / max_rpm.max(1) as f32;
     let ratio = ratio.clamp(0.0, 1.0);
@@ -3452,6 +4328,10 @@ fn FanGauge(
     // follows the visible arc from its 225-degree starting point.
     let needle = -225.0 + sweep;
     let style = format!("--sweep:{sweep:.2}deg;--needle:{needle:.2}deg");
+    let secondary_needle = secondary_rpm.map(|rpm| {
+        let ratio = (rpm as f32 / max_rpm.max(1) as f32).clamp(0.0, 1.0);
+        -225.0 + ratio * 270.0
+    });
     let rpm_value = rpm
         .map(|value| value.to_string())
         .unwrap_or_else(|| "--".into());
@@ -3465,12 +4345,22 @@ fn FanGauge(
             div { class: "gauge", style: "{style}",
                 div { class: "gauge-scale" }
                 div { class: "gauge-needle" }
+                if let Some(secondary_needle) = secondary_needle {
+                    div {
+                        class: "gauge-needle",
+                        style: "--needle:{secondary_needle:.2}deg;opacity:.62;background:linear-gradient(90deg,rgba(255,255,255,.04),#ffc86b);box-shadow:0 0 1.15cqh #ffc86b",
+                    }
+                }
                 div { class: "gauge-hub" }
                 span { class: "scale-min", "0" }
                 span { class: "scale-max", "{compact_rpm(max_rpm)}" }
                 div { class: "gauge-readout",
                     strong { "{rpm_value}" }
-                    span { "RPM" }
+                    if let Some(secondary_rpm) = secondary_rpm {
+                        span { "RPM · F3 {secondary_rpm}" }
+                    } else {
+                        span { "RPM" }
+                    }
                 }
             }
         }
@@ -3511,9 +4401,10 @@ fn FanSlider(
 #[component]
 fn ColorInput(
     language: Language,
-    label: &'static str,
+    label: usize,
     value: u32,
     on_change: EventHandler<u32>,
+    on_commit: EventHandler<u32>,
 ) -> Element {
     rsx! {
         label { class: "color-input", title: if language == Language::Czech { format!("Zóna {label}") } else { format!("Zone {label}") },
@@ -3521,18 +4412,26 @@ fn ColorInput(
                 r#type: "color",
                 value: "#{value:06x}",
                 oninput: move |event| {
-                    let value = event.value();
-                    if let Some(value) = value.strip_prefix('#')
-                        && value.len() == 6
-                        && let Ok(value) = u32::from_str_radix(value, 16)
-                    {
+                    if let Some(value) = parse_color_value(&event.value()) {
                         on_change.call(value);
+                    }
+                },
+                onchange: move |event| {
+                    if let Some(value) = parse_color_value(&event.value()) {
+                        on_commit.call(value);
                     }
                 },
             }
             span { "{label}" }
         }
     }
+}
+
+fn parse_color_value(value: &str) -> Option<u32> {
+    let value = value.strip_prefix('#')?;
+    (value.len() == 6)
+        .then(|| u32::from_str_radix(value, 16).ok())
+        .flatten()
 }
 
 fn parse_lighting_state(response: &str) -> Result<KeyboardLightingState, String> {
@@ -3690,6 +4589,13 @@ fn frequency(value: Option<u32>) -> String {
         .unwrap_or_else(|| "-- MHz".to_string())
 }
 
+fn gpu_offset_detail(label: &str, value: Option<i32>) -> String {
+    value.map_or_else(
+        || format!("{label} -- MHz"),
+        |value| format!("{label} {value:+} MHz"),
+    )
+}
+
 fn optional_u32(value: Option<u32>) -> String {
     value
         .map(|value| value.to_string())
@@ -3807,21 +4713,44 @@ mod tests {
     use super::{
         ADVANCED_DESIGN_WIDTH, APP_CSS_SOURCE, AppState, COMPACT_DESIGN_WIDTH, ControlAction,
         ControlOutcome, ControlRequest, ControlResultSlot, ControlUpdate, FanMode, HardwareProfile,
-        HealthState, KeyboardLightingState, Language, MIN_WINDOW_HEIGHT,
-        PROFILE_SYNC_GRACE_SAMPLES, PlatformAction, PlatformProfile, RuntimeState,
-        TELEMETRY_HISTORY_CAPACITY, TITLEBAR_DESIGN_HEIGHT, TelemetryHistory, TelemetryPoint,
-        TelemetrySlot, TelemetryUpdate, WORKSPACE_DESIGN_HEIGHT, apply_control_update,
-        aspect_constrained_size, begin_control_request, compact_status, graph_points,
-        keyboard_editor_readback, logical_window_size, merge_privileged_memory,
-        parse_lighting_state, physical_size_close, power_usage_limit, reconcile_profile_telemetry,
+        HealthState, KeyboardLightingState, Language, LightingApplyRequest, MAX_LIGHTING_ZONES,
+        MIN_WINDOW_HEIGHT, PROFILE_SYNC_GRACE_SAMPLES, PlatformAction, PlatformProfile,
+        RuntimeState, TELEMETRY_HISTORY_CAPACITY, TITLEBAR_DESIGN_HEIGHT, TelemetryHistory,
+        TelemetryPoint, TelemetrySlot, TelemetryUpdate, WORKSPACE_DESIGN_HEIGHT,
+        apply_control_update, apply_telemetry, aspect_constrained_size, begin_control_request,
+        compact_status, gpu_offset_detail, graph_points, keyboard_editor_readback,
+        lighting_apply_status, lighting_draft_for_device, lighting_mode_visibility,
+        lighting_zone_draft, localized_status, logical_window_size, merge_privileged_memory,
+        parse_color_value, parse_lighting_state, physical_size_close, power_usage_limit,
+        preferred_lighting_index, rear_logo_state, reconcile_profile_telemetry,
         setting_toggle_text, telemetry_retry_delay, workspace_aspect_ratio,
     };
-    use crate::control::ProfileApplyReceipt;
-    use crate::telemetry::MemoryHardwareInfo;
+    use crate::control::{
+        CapabilityLightingBackend, CapabilityLightingTarget, ControlLightingDevice,
+        ControlLightingMode, ControlLightingModes, ProfileApplyReceipt,
+    };
+    use crate::hardware::{FanChannelState, FanMode as HardwareFanMode, FanRpmChannel, FanState};
+    use crate::telemetry::{
+        GpuTelemetry, HardwareInfo, MemoryHardwareInfo, PowerSupplyTelemetry, SystemTelemetry,
+    };
     use crate::tuning::GpuOffsetState;
     use dioxus_desktop::tao::dpi::PhysicalSize;
     use dioxus_desktop::tao::window::ResizeDirection;
     use std::time::Duration;
+
+    fn css_rule(selector: &str) -> &'static str {
+        APP_CSS_SOURCE
+            .split(selector)
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap()
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("app.rs").split("#[cfg(test)]").next().unwrap()
+    }
 
     #[test]
     fn runtime_boot_defers_socket_connection_to_the_worker() {
@@ -3829,7 +4758,7 @@ mod tests {
         assert!(runtime.view.control_busy);
         assert!(!runtime.view.controls_enabled);
         assert_eq!(runtime.view.health, HealthState::Applying);
-        assert_eq!(runtime.view.status_message, "Připojuji acer_wmi");
+        assert_eq!(runtime.view.status_message, "Připojuji ovládání");
     }
 
     #[test]
@@ -3839,6 +4768,67 @@ mod tests {
         assert_eq!(language, Language::English);
         assert_eq!(language.code(), "EN");
         assert_eq!(language.html_code(), "en");
+    }
+
+    #[test]
+    fn telemetry_maps_third_fan_to_gpu_gauge_and_later_fans_to_diagnostics() {
+        let mut state = AppState::default();
+        apply_telemetry(
+            &mut state,
+            SystemTelemetry {
+                cpu_temperature_c: Some(60.0),
+                cpu_utilization_percent: Some(10.0),
+                memory_used_mib: 1_024,
+                memory_total_mib: 2_048,
+                gpu: GpuTelemetry::default(),
+                fans: FanState {
+                    cpu: FanChannelState {
+                        mode: Some(HardwareFanMode::Automatic),
+                        pwm_raw: 0,
+                        rpm: 2_100,
+                    },
+                    gpu: FanChannelState {
+                        mode: Some(HardwareFanMode::Automatic),
+                        pwm_raw: 0,
+                        rpm: 2_200,
+                    },
+                },
+                fan_rpm_channels: vec![
+                    FanRpmChannel {
+                        index: 1,
+                        label: "CPU".to_string(),
+                        rpm: Some(2_100),
+                    },
+                    FanRpmChannel {
+                        index: 2,
+                        label: "GPU".to_string(),
+                        rpm: Some(2_200),
+                    },
+                    FanRpmChannel {
+                        index: 3,
+                        label: "GPU 2".to_string(),
+                        rpm: Some(2_300),
+                    },
+                    FanRpmChannel {
+                        index: 4,
+                        label: "System".to_string(),
+                        rpm: Some(2_400),
+                    },
+                ],
+                profile_raw: Some("balanced".to_string()),
+                profile: Some(HardwareProfile::Balanced),
+                hardware: HardwareInfo::default(),
+                power_supply: PowerSupplyTelemetry::default(),
+            },
+        );
+
+        assert_eq!(state.telemetry.cpu_fan_rpm, Some(2_100));
+        assert_eq!(state.telemetry.gpu_fan_rpm, Some(2_200));
+        assert_eq!(state.telemetry.gpu_aux_fan_rpm, Some(2_300));
+        assert_eq!(
+            state.telemetry.additional_fans,
+            vec![("System".to_string(), 2_400)]
+        );
     }
 
     #[test]
@@ -3868,6 +4858,152 @@ mod tests {
             keyboard_editor_readback(&effect),
             Some((63, [0x66_33cc, 0xab_cdef, 0x00_1020, 0xfe_dcba]))
         );
+    }
+
+    #[test]
+    fn lighting_capabilities_drive_endpoint_modes_and_sixteen_zone_draft() {
+        let devices = vec![
+            ControlLightingDevice {
+                id: "hid-keyboard".to_string(),
+                backend: CapabilityLightingBackend::Enek5130,
+                target: CapabilityLightingTarget::Keyboard,
+                zones: 1,
+                modes: ControlLightingModes {
+                    static_color: true,
+                    brightness: true,
+                    breathing: false,
+                    neon: false,
+                },
+                state_readable: false,
+            },
+            ControlLightingDevice {
+                id: "wmi-keyboard".to_string(),
+                backend: CapabilityLightingBackend::ZonedWmi,
+                target: CapabilityLightingTarget::Keyboard,
+                zones: 4,
+                modes: ControlLightingModes {
+                    static_color: true,
+                    brightness: true,
+                    breathing: true,
+                    neon: true,
+                },
+                state_readable: true,
+            },
+        ];
+
+        assert_eq!(preferred_lighting_index(&devices), Some(1));
+        assert_eq!(
+            lighting_mode_visibility(Some(devices[0].modes)),
+            (true, true, false, false)
+        );
+
+        let seed = [0x01_0203, 0x04_0506, 0x07_0809, 0x0a_0b0c];
+        let zones = lighting_zone_draft(&seed);
+        assert_eq!(zones.len(), usize::from(MAX_LIGHTING_ZONES));
+        assert_eq!(&zones[..seed.len()], &seed);
+        assert_eq!(zones[4], KeyboardLightingState::default().zones[0]);
+    }
+
+    #[test]
+    fn lighting_drafts_are_kept_per_target_without_a_reactive_effect_loop() {
+        let device = ControlLightingDevice {
+            id: "enek-logo".to_string(),
+            backend: CapabilityLightingBackend::Enek5130,
+            target: CapabilityLightingTarget::CoverLogo,
+            zones: 1,
+            modes: ControlLightingModes {
+                static_color: true,
+                brightness: true,
+                breathing: false,
+                neon: false,
+            },
+            state_readable: false,
+        };
+        let request = LightingApplyRequest {
+            device_id: device.id.clone(),
+            state_readable: false,
+            mode: ControlLightingMode::Static,
+            brightness: 47,
+            speed: 0,
+            color: [0x12, 0x34, 0x56],
+            zone_colors: Vec::new(),
+        };
+
+        let (brightness, colors) =
+            lighting_draft_for_device(&device, &KeyboardLightingState::default(), &[request]);
+        assert_eq!(brightness, 47);
+        assert_eq!(colors[0], 0x12_3456);
+
+        let control_dock = production_source()
+            .split("fn ControlDock")
+            .nth(1)
+            .unwrap()
+            .split("fn StatusBar")
+            .next()
+            .unwrap();
+        assert!(!control_dock.contains("use_effect"));
+        assert!(!control_dock.contains("use_reactive"));
+    }
+
+    #[test]
+    fn rear_logo_off_uses_zero_brightness_and_on_restores_the_draft() {
+        let off = rear_logo_state(false, 63, 0x12_3456);
+        assert!(!off.enabled);
+        assert_eq!(off.brightness, 0);
+        assert_eq!(off.color, [0x12, 0x34, 0x56]);
+
+        let on = rear_logo_state(true, 63, 0x12_3456);
+        assert!(on.enabled);
+        assert_eq!(on.brightness, 63);
+        assert_eq!(on.color, [0x12, 0x34, 0x56]);
+    }
+
+    #[test]
+    fn color_picker_values_are_strict_six_digit_rgb() {
+        assert_eq!(parse_color_value("#12abEF"), Some(0x12_ab_ef));
+        assert_eq!(parse_color_value("12abef"), None);
+        assert_eq!(parse_color_value("#abc"), None);
+        assert_eq!(parse_color_value("#gg0000"), None);
+    }
+
+    #[test]
+    fn write_only_lighting_apply_preserves_readable_wmi_state() {
+        let mut state = AppState {
+            lighting: KeyboardLightingState {
+                available: true,
+                powered: true,
+                mode: 1,
+                brightness: 63,
+                color: 0x12_3456,
+                ..KeyboardLightingState::default()
+            },
+            ..AppState::default()
+        };
+        let readable_state = state.lighting.clone();
+        let request = LightingApplyRequest {
+            device_id: "hid-keyboard".to_string(),
+            state_readable: false,
+            mode: ControlLightingMode::Neon,
+            brightness: 88,
+            speed: 5,
+            color: [0x65, 0x43, 0x21],
+            zone_colors: Vec::new(),
+        };
+
+        apply_control_update(
+            &mut state,
+            ControlUpdate {
+                request: ControlRequest::foreground(ControlAction::LightingApply(request.clone())),
+                result: Ok(ControlOutcome::LightingApplied {
+                    request: request.clone(),
+                    firmware_state: None,
+                }),
+            },
+        );
+
+        assert_eq!(state.lighting, readable_state);
+        assert_eq!(state.last_applied_lighting, vec![request]);
+        assert_eq!(state.status_message, "Použito · stav nelze přečíst");
     }
 
     #[test]
@@ -3914,6 +5050,31 @@ mod tests {
     }
 
     #[test]
+    fn write_only_lighting_never_claims_firmware_readback() {
+        assert_eq!(lighting_apply_status(true), "Nastavení potvrzeno firmwarem");
+        assert_eq!(lighting_apply_status(false), "Použito · stav nelze přečíst");
+        assert_eq!(
+            localized_status(Language::English, lighting_apply_status(false)),
+            "Applied · state readback unavailable"
+        );
+        assert_eq!(
+            compact_status(Language::English, lighting_apply_status(false)),
+            "Last applied"
+        );
+        assert_eq!(
+            localized_status(
+                Language::English,
+                "Nastavení podsvícení potvrzeno firmwarem"
+            ),
+            "Lighting confirmed by firmware"
+        );
+        assert_eq!(
+            compact_status(Language::Czech, "Nastavení podsvícení potvrzeno firmwarem"),
+            "Podsvícení potvrzeno"
+        );
+    }
+
+    #[test]
     fn setting_toggle_distinguishes_read_errors_from_unsupported_features() {
         assert_eq!(
             setting_toggle_text(Some(true), false, Language::Czech),
@@ -3946,7 +5107,7 @@ mod tests {
         let mut state = AppState::default();
         let request = ControlRequest::foreground(ControlAction::FanMode(FanMode::Maximum));
 
-        assert!(begin_control_request(&mut state, request));
+        assert!(begin_control_request(&mut state, request.clone()));
         assert!(state.control_busy);
         assert_eq!(state.health, HealthState::Applying);
         assert!(!begin_control_request(
@@ -3970,16 +5131,18 @@ mod tests {
     #[test]
     fn verified_profile_transition_ignores_cross_plane_telemetry_until_coherent() {
         let mut state = AppState::default();
-        let request = ControlRequest::foreground(ControlAction::Profile(PlatformProfile::Turbo));
-        assert!(begin_control_request(&mut state, request));
+        let request = ControlRequest::foreground(ControlAction::Profile(
+            PlatformProfile::Turbo.as_sysfs().to_string(),
+        ));
+        assert!(begin_control_request(&mut state, request.clone()));
         apply_control_update(
             &mut state,
             ControlUpdate {
                 request,
                 result: Ok(ControlOutcome::Profile {
-                    profile: PlatformProfile::Turbo,
+                    profile_raw: PlatformProfile::Turbo.as_sysfs().to_string(),
                     receipt: ProfileApplyReceipt {
-                        firmware_profile: HardwareProfile::Turbo,
+                        firmware_profile: PlatformProfile::Turbo.as_sysfs().to_string(),
                         gpu_offsets: GpuOffsetState::OemTurbo,
                         gpu_pstate_count: 4,
                         gpu_capability_available: true,
@@ -4055,13 +5218,28 @@ mod tests {
             Some(true),
         );
         assert_eq!(state.health, HealthState::Healthy);
-        assert_eq!(state.status_message, "acer_wmi + NVIDIA připojeno");
+        assert_eq!(state.status_message, "Ovládání Acer + NVIDIA připojeno");
     }
 
     #[test]
     fn gpu_status_pairs_live_draw_with_the_current_enforced_limit() {
         assert_eq!(power_usage_limit(Some(4.2), Some(30.0)), "4/30 W");
         assert_eq!(power_usage_limit(None, Some(30.0)), "--/-- W");
+    }
+
+    #[test]
+    fn sleeping_gpu_uses_truthful_zero_history_without_invented_offsets() {
+        let point = TelemetryPoint::from(&super::Telemetry {
+            gpu_sleeping: true,
+            gpu_load_percent: Some(87.0),
+            gpu_power_w: Some(99.0),
+            gpu_graphics_clock_mhz: Some(2_400),
+            ..super::Telemetry::default()
+        });
+        assert_eq!(point.gpu_load_percent, Some(0.0));
+        assert_eq!(point.gpu_power_w, Some(0.0));
+        assert_eq!(point.gpu_graphics_clock_mhz, Some(0.0));
+        assert_eq!(gpu_offset_detail("VF/GPC", None), "VF/GPC -- MHz");
     }
 
     #[test]
@@ -4073,7 +5251,7 @@ mod tests {
         };
         let request = ControlRequest::background(ControlAction::Platform(PlatformAction::Refresh));
 
-        assert!(begin_control_request(&mut state, request));
+        assert!(begin_control_request(&mut state, request.clone()));
         apply_control_update(
             &mut state,
             ControlUpdate {
@@ -4097,12 +5275,12 @@ mod tests {
         let slot = ControlResultSlot::default();
         let request = ControlRequest::foreground(ControlAction::FanMode(FanMode::Auto));
         assert!(slot.publish(ControlUpdate {
-            request,
+            request: request.clone(),
             result: Ok(ControlOutcome::FanMode(FanMode::Auto)),
         }));
 
         assert!(!slot.publish(ControlUpdate {
-            request,
+            request: request.clone(),
             result: Err("second completion".to_string()),
         }));
         assert_eq!(slot.try_take().unwrap().request, request);
@@ -4236,8 +5414,7 @@ mod tests {
 
     #[test]
     fn system_controls_live_only_on_advanced_device_page() {
-        let source = include_str!("app.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = production_source();
         let control_dock = production
             .split("fn ControlDock")
             .nth(1)
@@ -4263,8 +5440,7 @@ mod tests {
 
     #[test]
     fn desktop_coalesces_native_aspect_lock_and_webview_transform_updates() {
-        let source = include_str!("app.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = production_source();
 
         assert!(production.contains("with_decorations(false)"));
         assert!(production.contains("with_resizable(true)"));
@@ -4379,8 +5555,7 @@ mod tests {
 
     #[test]
     fn ui_never_replaces_text_with_an_ellipsis() {
-        let source = include_str!("app.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = production_source();
         assert!(!APP_CSS_SOURCE.contains("text-overflow: ellipsis"));
         assert!(!production.contains('…'));
         assert!(!production.contains("..."));
@@ -4389,41 +5564,11 @@ mod tests {
     #[test]
     fn fan_cards_and_hidden_dock_editors_have_stable_bento_grids() {
         let source = include_str!("app.rs");
-        let fan_panel_rule = APP_CSS_SOURCE
-            .split(".fan-panel {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let manual_panel_rule = APP_CSS_SOURCE
-            .split(".fan-panel.manual {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let control_button_rule = APP_CSS_SOURCE
-            .split(".profile,\n.dock-tab,\n.mode {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let fan_summary_rule = APP_CSS_SOURCE
-            .split(".fan-mode-summary {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let manual_editor_rule = APP_CSS_SOURCE
-            .split(".manual-panel {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
+        let fan_panel_rule = css_rule(".fan-panel {");
+        let manual_panel_rule = css_rule(".fan-panel.manual {");
+        let control_button_rule = css_rule(".profile,\n.dock-tab,\n.mode {");
+        let fan_summary_rule = css_rule(".fan-mode-summary {");
+        let manual_editor_rule = css_rule(".manual-panel {");
         assert!(APP_CSS_SOURCE.contains(".gauge-grid"));
         assert!(APP_CSS_SOURCE.contains("grid-template-columns: repeat(2, minmax(0, 1fr))"));
         assert!(APP_CSS_SOURCE.contains("width: 100%"));
@@ -4450,35 +5595,11 @@ mod tests {
     #[test]
     fn advanced_pages_fill_the_stage_with_balanced_bento_tiles() {
         let source = include_str!("app.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
-        let header_control_rule = APP_CSS_SOURCE
-            .split(".language-toggle,\n.health-pill,\n.advanced-toggle {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let shell_rule = APP_CSS_SOURCE
-            .split(".asense-shell {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let advanced_panel_rule = APP_CSS_SOURCE
-            .split(".advanced-panel {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let hardware_note_rule = APP_CSS_SOURCE
-            .split(".hardware-note {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
+        let production = production_source();
+        let header_control_rule = css_rule(".language-toggle,\n.health-pill,\n.advanced-toggle {");
+        let shell_rule = css_rule(".asense-shell {");
+        let advanced_panel_rule = css_rule(".advanced-panel {");
+        let hardware_note_rule = css_rule(".hardware-note {");
         assert!(APP_CSS_SOURCE.contains("grid-template-columns: repeat(4, minmax(0, 1fr))"));
         assert!(shell_rule.contains("background:"));
         assert!(header_control_rule.contains("border-radius: 10.121px"));
@@ -4524,41 +5645,11 @@ mod tests {
 
     #[test]
     fn every_page_ends_on_the_same_forty_pixel_status_tile() {
-        let primary_rule = APP_CSS_SOURCE
-            .split(".primary-panel {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let metrics_rule = APP_CSS_SOURCE
-            .split(".metrics-content {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let hardware_rule = APP_CSS_SOURCE
-            .split(".hardware-page {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let device_rule = APP_CSS_SOURCE
-            .split(".device-bento {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let platform_page_rule = APP_CSS_SOURCE
-            .split(".platform-page {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
+        let primary_rule = css_rule(".primary-panel {");
+        let metrics_rule = css_rule(".metrics-content {");
+        let hardware_rule = css_rule(".hardware-page {");
+        let device_rule = css_rule(".device-bento {");
+        let platform_page_rule = css_rule(".platform-page {");
 
         assert!(primary_rule.contains("200px 40px"));
         assert!(metrics_rule.contains("minmax(0, 1fr) 40px"));
@@ -4573,13 +5664,7 @@ mod tests {
             ".hardware-note {",
             ".platform-readback {",
         ] {
-            let rule = APP_CSS_SOURCE
-                .split(selector)
-                .nth(1)
-                .unwrap()
-                .split('}')
-                .next()
-                .unwrap();
+            let rule = css_rule(selector);
             assert!(rule.contains("height: 40px"), "{selector}");
             assert!(rule.contains("border:"), "{selector}");
         }
@@ -4587,8 +5672,7 @@ mod tests {
 
     #[test]
     fn transient_advanced_errors_reuse_fixed_status_tiles_without_reflow() {
-        let source = include_str!("app.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = production_source();
 
         assert!(production.contains("\"platform-readback warning\""));
         assert!(production.contains("\"throttle-state telemetry-error\""));
@@ -4599,22 +5683,11 @@ mod tests {
 
     #[test]
     fn device_controls_are_two_row_tiles_and_color_wells_are_large() {
-        let device_control_rule = APP_CSS_SOURCE
-            .split(".device-bento .setting-toggle,\n.device-bento .usb-charging-control {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let color_rule = APP_CSS_SOURCE
-            .split(".color-input input[type=\"color\"],\n.logo-color input[type=\"color\"] {")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        let source = include_str!("app.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let device_control_rule =
+            css_rule(".device-bento .setting-toggle,\n.device-bento .usb-charging-control {");
+        let color_rule =
+            css_rule(".color-input input[type=\"color\"],\n.logo-color input[type=\"color\"] {");
+        let production = production_source();
 
         assert!(device_control_rule.contains("grid-template-columns: minmax(0, 1fr)"));
         assert!(device_control_rule.contains("grid-template-rows: minmax(0, 1fr) 40px"));

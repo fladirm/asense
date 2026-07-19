@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
             libxdo-dev libssl-dev libelf-dev linux-headers-generic \
-            desktop-file-utils
+            desktop-file-utils udev
 
       - name: Install Rust
         run: |
@@ -57,6 +57,7 @@ jobs:
             scripts/package-release.sh \
             scripts/verify-release.sh
           sh -n packaging/asense-system-sleep
+          udevadm verify packaging/71-asense-hid.rules
           temporary="$(mktemp -d)"
           install -D -m 0644 packaging/90-asense-predator-key.hwdb \
             "$temporary/etc/udev/hwdb.d/90-asense-predator-key.hwdb"
@@ -89,5 +90,16 @@ jobs:
           } | sort -V | tail -n 1)"
           test -n "$headers"
           test -f "$headers/Makefile"
+          header_release="${headers##*/linux-headers-}"
+          printf 'Compiling DKMS transport against %s on %s\n' \
+            "$header_release" '${{ matrix.os }}'
+          if [[ '${{ matrix.os }}' == 'ubuntu-24.04' ]]; then
+            [[ "$header_release" == 6.8.* ]]
+          else
+            major="${header_release%%.*}"
+            minor="${header_release#*.}"
+            minor="${minor%%.*}"
+            ((major > 6 || (major == 6 && minor >= 9)))
+          fi
           make -C "$headers" M="$GITHUB_WORKSPACE/kernel" modules
           make -C "$headers" M="$GITHUB_WORKSPACE/kernel" clean

@@ -1,4 +1,5 @@
-//! Fail-closed NVIDIA backend for the exact PHN16-72 RTX 4070 Laptop GPU.
+//! Observer-neutral NVIDIA telemetry plus the fail-closed exact PHN16-72
+//! RTX 4070 Laptop tuning backend.
 //!
 //! This module deliberately exposes no static power-limit setter.  Dynamic
 //! Boost and its enforced power ceiling remain owned by NVIDIA's controller;
@@ -349,6 +350,42 @@ pub struct PciIdentity {
     pub subsystem_device: u16,
 }
 
+/// Read-only PCI identity and runtime-power state used to decide whether
+/// opening NVML would wake a hybrid laptop dGPU.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NvidiaPciDevice {
+    pub bus_id: String,
+    pub identity: PciIdentity,
+    pub runtime_status: NvidiaRuntimeStatus,
+}
+
+impl NvidiaPciDevice {
+    pub fn is_exact_oem_target(&self) -> bool {
+        self.identity == PciIdentity::EXPECTED
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NvidiaRuntimeStatus {
+    Active,
+    Suspended,
+    Suspending,
+    Resuming,
+    /// The PCI device does not expose runtime PM or explicitly reports that
+    /// it is unsupported. Preserve the pre-v0.2 best-effort NVML behavior.
+    Unsupported,
+    /// A kernel value unknown to this release or an unreadable runtime-PM
+    /// node is not interpreted optimistically. A future value may represent
+    /// an in-flight transition just like `suspending` or `resuming`.
+    Unknown,
+}
+
+impl NvidiaRuntimeStatus {
+    pub const fn permits_live_nvml(self) -> bool {
+        matches!(self, Self::Active | Self::Unsupported)
+    }
+}
+
 impl PciIdentity {
     pub const EXPECTED: Self = Self {
         vendor: NVIDIA_VENDOR_ID,
@@ -369,7 +406,7 @@ pub enum NvidiaError {
         value: String,
     },
     WrongGpu {
-        bus_id: &'static str,
+        bus_id: String,
         expected: PciIdentity,
         actual: PciIdentity,
     },
@@ -384,6 +421,10 @@ pub enum NvidiaError {
     InvalidTelemetry {
         field: &'static str,
         value: String,
+    },
+    RuntimePowerState {
+        bus_id: String,
+        status: NvidiaRuntimeStatus,
     },
     Nvml {
         operation: &'static str,
@@ -457,6 +498,10 @@ impl fmt::Display for NvidiaError {
             Self::InvalidTelemetry { field, value } => {
                 write!(formatter, "NVML returned invalid {field}: {value}")
             }
+            Self::RuntimePowerState { bus_id, status } => write!(
+                formatter,
+                "GPU {bus_id} runtime state {status:?} does not permit live NVML"
+            ),
             Self::Nvml {
                 operation,
                 code,
@@ -727,17 +772,20 @@ fn nvml_error_from(
 pub struct NvidiaController {
     runtime: NvmlRuntime,
     device: NvmlDevice,
+    pci_bus_id: String,
     states: Vec<PerformanceState>,
     exact_oem_target: bool,
-    /// Only the exact OEM discovery path may mutate VF offsets.  The generic
-    /// telemetry path deliberately owns the same long-lived NVML handle, but
-    /// must remain structurally unable to become a tuning controller merely
-    /// because a driver happens to expose offset symbols.
+    /// Only the exact OEM discovery path may mutate VF offsets. The generic
+    /// sample-scoped telemetry path must remain structurally unable to become
+    /// a tuning controller merely because a driver exposes offset symbols.
     mutation_authorized: bool,
 }
 
-fn open_device(runtime: &NvmlRuntime) -> Result<NvmlDevice, NvidiaError> {
-    let bus_id = CString::new(GPU_PCI_BUS_ID).expect("static PCI ID contains no NUL");
+fn open_device(runtime: &NvmlRuntime, pci_bus_id: &str) -> Result<NvmlDevice, NvidiaError> {
+    let bus_id = CString::new(pci_bus_id).map_err(|_| NvidiaError::InvalidTelemetry {
+        field: "PCI bus ID",
+        value: pci_bus_id.to_owned(),
+    })?;
     let mut device = std::ptr::null_mut();
     // SAFETY: runtime is initialized, bus_id is NUL terminated, output is valid.
     let code = unsafe { (runtime.symbols.get_handle_by_pci_bus_id)(bus_id.as_ptr(), &mut device) };
@@ -759,31 +807,48 @@ impl NvidiaController {
         Self::discover_with_sysfs_root(Path::new("/"))
     }
 
-    /// Opens the canonical laptop dGPU for read-only telemetry without
-    /// requiring the PHN16-72 OEM VF-offset ABI. Missing offset symbols or a
-    /// different P-state topology only omit offset telemetry; temperature,
-    /// utilization, clocks, VRAM and power remain available.
-    pub fn discover_telemetry() -> Result<Self, NvidiaError> {
-        let exact_oem_target = read_pci_identity(Path::new("/"))
-            .is_ok_and(|identity| identity == PciIdentity::EXPECTED);
+    /// Opens the passively selected NVIDIA display controller for read-only
+    /// telemetry without requiring the PHN16-72 OEM VF-offset ABI. Missing
+    /// offset symbols or a different P-state topology only omit offset
+    /// telemetry; temperature, utilization, clocks, VRAM and power remain
+    /// available.
+    pub fn discover_telemetry(
+        pci_device: &NvidiaPciDevice,
+        sysfs_root: &Path,
+        probe_offsets: bool,
+    ) -> Result<Self, NvidiaError> {
+        if !pci_device.runtime_status.permits_live_nvml() {
+            return Err(NvidiaError::RuntimePowerState {
+                bus_id: pci_device.bus_id.clone(),
+                status: pci_device.runtime_status,
+            });
+        }
+        let actual = read_pci_identity_at(sysfs_root, &pci_device.bus_id)?;
+        let exact_oem_target = actual == PciIdentity::EXPECTED;
         let runtime = NvmlRuntime::load()?;
-        let device = open_device(&runtime)?;
+        let device = open_device(&runtime, &pci_device.bus_id)?;
         let mut controller = Self {
             runtime,
             device,
+            pci_bus_id: pci_device.bus_id.clone(),
             states: Vec::new(),
             exact_oem_target,
             mutation_authorized: false,
         };
-        controller.states = controller.probe_supported_states().unwrap_or_default();
+        if probe_offsets {
+            controller.states = controller.probe_supported_states().unwrap_or_default();
+        }
         Ok(controller)
     }
 
     fn discover_with_sysfs_root(sysfs_root: &Path) -> Result<Self, NvidiaError> {
-        let actual = read_pci_identity(sysfs_root)?;
+        let (pci_bus_id, actual) = match discover_nvidia_pci_device(sysfs_root) {
+            Some(device) => (device.bus_id, device.identity),
+            None => (GPU_PCI_BUS_ID.to_owned(), read_pci_identity(sysfs_root)?),
+        };
         if actual != PciIdentity::EXPECTED {
             return Err(NvidiaError::WrongGpu {
-                bus_id: GPU_PCI_BUS_ID,
+                bus_id: pci_bus_id,
                 expected: PciIdentity::EXPECTED,
                 actual,
             });
@@ -798,10 +863,11 @@ impl NvidiaController {
                 operation: "OEM VF clock offsets",
             });
         }
-        let device = open_device(&runtime)?;
+        let device = open_device(&runtime, &pci_bus_id)?;
         let mut controller = Self {
             runtime,
             device,
+            pci_bus_id,
             states: Vec::new(),
             exact_oem_target: true,
             mutation_authorized: true,
@@ -823,6 +889,10 @@ impl NvidiaController {
 
     pub const fn is_exact_oem_target(&self) -> bool {
         self.exact_oem_target
+    }
+
+    pub fn pci_bus_id(&self) -> &str {
+        &self.pci_bus_id
     }
 
     /// Collects live data through the controller's already-initialized NVML
@@ -901,10 +971,9 @@ impl NvidiaController {
         NvidiaStaticInfo {
             model,
             driver_version,
-            // Both discovery paths opened this canonical bus address.  OEM
-            // identity authorization is intentionally tracked separately
-            // from this read-only informational field.
-            pci_bus_id: Some(GPU_PCI_BUS_ID.to_owned()),
+            // Generic telemetry follows the dynamically discovered display
+            // controller. OEM mutation authorization is tracked separately.
+            pci_bus_id: Some(self.pci_bus_id.clone()),
             maximum_graphics_clock_mhz,
             maximum_memory_clock_mhz,
             errors,
@@ -1516,13 +1585,92 @@ fn rollback_after_failure(
     }
 }
 
+/// Finds an NVIDIA display controller deterministically. The exact Acer PCI
+/// identity is preferred when present; generic telemetry is not tied to one
+/// bus address.
+pub fn discover_nvidia_pci_device(root: &Path) -> Option<NvidiaPciDevice> {
+    let devices_root = root.join("sys/bus/pci/devices");
+    let mut candidates = fs::read_dir(&devices_root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let bus_id = entry.file_name().into_string().ok()?;
+            let vendor = read_hex_u16(&path.join("vendor")).ok()?;
+            let class = read_hex_u32(&path.join("class")).ok()?;
+            if vendor != NVIDIA_VENDOR_ID || class >> 16 != 0x03 {
+                return None;
+            }
+            let identity = read_pci_identity_at(root, &bus_id).ok()?;
+            let runtime_status =
+                classify_runtime_status(fs::read_to_string(path.join("power/runtime_status")));
+            Some(NvidiaPciDevice {
+                bus_id,
+                identity,
+                runtime_status,
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let left_rank = (
+            !left.is_exact_oem_target(),
+            left.bus_id != GPU_PCI_BUS_ID,
+            &left.bus_id,
+        );
+        let right_rank = (
+            !right.is_exact_oem_target(),
+            right.bus_id != GPU_PCI_BUS_ID,
+            &right.bus_id,
+        );
+        left_rank.cmp(&right_rank)
+    });
+    candidates.into_iter().next()
+}
+
+fn classify_runtime_status(value: Result<String, std::io::Error>) -> NvidiaRuntimeStatus {
+    match value {
+        Ok(value) => match value.trim() {
+            "active" => NvidiaRuntimeStatus::Active,
+            "suspended" => NvidiaRuntimeStatus::Suspended,
+            "suspending" => NvidiaRuntimeStatus::Suspending,
+            "resuming" => NvidiaRuntimeStatus::Resuming,
+            "unsupported" => NvidiaRuntimeStatus::Unsupported,
+            _ => NvidiaRuntimeStatus::Unknown,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            NvidiaRuntimeStatus::Unsupported
+        }
+        Err(_) => NvidiaRuntimeStatus::Unknown,
+    }
+}
+
 fn read_pci_identity(root: &Path) -> Result<PciIdentity, NvidiaError> {
-    let device_root = root.join("sys/bus/pci/devices").join(GPU_PCI_BUS_ID);
+    read_pci_identity_at(root, GPU_PCI_BUS_ID)
+}
+
+fn read_pci_identity_at(root: &Path, bus_id: &str) -> Result<PciIdentity, NvidiaError> {
+    let device_root = root.join("sys/bus/pci/devices").join(bus_id);
     Ok(PciIdentity {
         vendor: read_hex_u16(&device_root.join("vendor"))?,
         device: read_hex_u16(&device_root.join("device"))?,
         subsystem_vendor: read_hex_u16(&device_root.join("subsystem_vendor"))?,
         subsystem_device: read_hex_u16(&device_root.join("subsystem_device"))?,
+    })
+}
+
+fn read_hex_u32(path: &Path) -> Result<u32, NvidiaError> {
+    let value = fs::read_to_string(path).map_err(|source| NvidiaError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let trimmed = value.trim();
+    let digits = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    u32::from_str_radix(digits, 16).map_err(|_| NvidiaError::InvalidSysfsHex {
+        path: path.to_owned(),
+        value: trimmed.to_owned(),
     })
 }
 
@@ -1546,8 +1694,11 @@ fn read_hex_u16(path: &Path) -> Result<u16, NvidiaError> {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+
+    static NEXT_PCI_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     type Key = (PerformanceState, ClockDomain);
 
@@ -1728,6 +1879,140 @@ mod tests {
     fn nvml_clock_offset_layout_matches_cuda_13_header() {
         assert_eq!(std::mem::size_of::<NvmlClockOffset>(), 24);
         assert_eq!(NVML_CLOCK_OFFSET_VERSION, 0x0100_0018);
+    }
+
+    #[test]
+    fn runtime_power_state_gates_live_nvml() {
+        assert!(NvidiaRuntimeStatus::Active.permits_live_nvml());
+        assert!(NvidiaRuntimeStatus::Unsupported.permits_live_nvml());
+        assert!(!NvidiaRuntimeStatus::Suspended.permits_live_nvml());
+        assert!(!NvidiaRuntimeStatus::Suspending.permits_live_nvml());
+        assert!(!NvidiaRuntimeStatus::Resuming.permits_live_nvml());
+        assert!(!NvidiaRuntimeStatus::Unknown.permits_live_nvml());
+    }
+
+    #[test]
+    fn runtime_status_parser_distinguishes_compatibility_from_unknown_io() {
+        for (raw, expected) in [
+            ("active", NvidiaRuntimeStatus::Active),
+            ("suspended", NvidiaRuntimeStatus::Suspended),
+            ("suspending", NvidiaRuntimeStatus::Suspending),
+            ("resuming", NvidiaRuntimeStatus::Resuming),
+            ("unsupported", NvidiaRuntimeStatus::Unsupported),
+            ("future", NvidiaRuntimeStatus::Unknown),
+            ("", NvidiaRuntimeStatus::Unknown),
+        ] {
+            assert_eq!(classify_runtime_status(Ok(raw.to_owned())), expected);
+        }
+        assert_eq!(
+            classify_runtime_status(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            NvidiaRuntimeStatus::Unsupported
+        );
+        assert_eq!(
+            classify_runtime_status(Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            NvidiaRuntimeStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn discovers_nvidia_display_controller_and_runtime_state_without_nvml() {
+        let root = pci_fixture_root("runtime-state");
+        write_pci_fixture(
+            &root,
+            GPU_PCI_BUS_ID,
+            0x10de,
+            0x28a0,
+            0x030200,
+            Some("active"),
+        );
+        write_pci_fixture(
+            &root,
+            "0000:07:00.0",
+            NVIDIA_VENDOR_ID,
+            RTX_4070_LAPTOP_DEVICE_ID,
+            0x030000,
+            Some("suspended"),
+        );
+
+        let device = discover_nvidia_pci_device(&root).expect("NVIDIA display controller");
+        assert_eq!(device.bus_id, "0000:07:00.0");
+        assert_eq!(device.runtime_status, NvidiaRuntimeStatus::Suspended);
+        assert!(device.is_exact_oem_target());
+        assert!(matches!(
+            NvidiaController::discover_telemetry(&device, &root, false),
+            Err(NvidiaError::RuntimePowerState {
+                status: NvidiaRuntimeStatus::Suspended,
+                ..
+            })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_runtime_status_preserves_best_effort_telemetry() {
+        let root = pci_fixture_root("missing-runtime-status");
+        write_pci_fixture(
+            &root,
+            "0000:03:00.0",
+            NVIDIA_VENDOR_ID,
+            0x28a0,
+            0x030200,
+            None,
+        );
+        let device = discover_nvidia_pci_device(&root).expect("NVIDIA display controller");
+        assert_eq!(device.runtime_status, NvidiaRuntimeStatus::Unsupported);
+        assert!(device.runtime_status.permits_live_nvml());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_runtime_status_never_reaches_nvml() {
+        let root = pci_fixture_root("unknown-runtime-status");
+        write_pci_fixture(
+            &root,
+            "0000:03:00.0",
+            NVIDIA_VENDOR_ID,
+            0x28a0,
+            0x030200,
+            Some("mystery"),
+        );
+        let device = discover_nvidia_pci_device(&root).expect("NVIDIA display controller");
+        assert_eq!(device.runtime_status, NvidiaRuntimeStatus::Unknown);
+        assert!(matches!(
+            NvidiaController::discover_telemetry(&device, &root, false),
+            Err(NvidiaError::RuntimePowerState {
+                status: NvidiaRuntimeStatus::Unknown,
+                ..
+            })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn pci_fixture_root(label: &str) -> PathBuf {
+        let id = NEXT_PCI_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("asense-nvidia-{label}-{}-{id}", std::process::id()))
+    }
+
+    fn write_pci_fixture(
+        root: &Path,
+        bus_id: &str,
+        vendor: u16,
+        device: u16,
+        class: u32,
+        runtime_status: Option<&str>,
+    ) {
+        let path = root.join("sys/bus/pci/devices").join(bus_id);
+        fs::create_dir_all(path.join("power")).unwrap();
+        fs::write(path.join("vendor"), format!("0x{vendor:04x}\n")).unwrap();
+        fs::write(path.join("device"), format!("0x{device:04x}\n")).unwrap();
+        fs::write(path.join("class"), format!("0x{class:06x}\n")).unwrap();
+        fs::write(path.join("subsystem_vendor"), "0x1025\n").unwrap();
+        fs::write(path.join("subsystem_device"), "0x1731\n").unwrap();
+        if let Some(status) = runtime_status {
+            fs::write(path.join("power/runtime_status"), format!("{status}\n")).unwrap();
+        }
     }
 
     #[test]

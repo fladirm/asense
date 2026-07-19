@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command in bash cargo find grep install make mktemp sed sh sort systemd-analyze systemd-hwdb; do
+for command in base64 bash cargo cmp desktop-file-validate find grep install make mktemp sed sh sort systemd-analyze systemd-hwdb tr udevadm; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'asense-verify: missing command: %s\n' "$command" >&2
     exit 1
@@ -35,6 +35,12 @@ run cargo clippy --locked --all-targets --all-features -- -D warnings
 # other default feature pulled in by the desktop application.
 run cargo clippy --locked --bin asensed --no-default-features -- -D warnings
 run cargo build --release --locked --bin asensed --no-default-features
+run desktop-file-validate assets/asense.desktop
+
+printf '\n==> embedded PayPal QR verification\n'
+base64 docs/asense-paypal-qr.png | tr -d '\r\n' >"$temporary/paypal-qr-from-png"
+tr -d '\r\n' <src/app/paypal_qr_base64.txt >"$temporary/paypal-qr-embedded"
+run cmp "$temporary/paypal-qr-from-png" "$temporary/paypal-qr-embedded"
 
 printf '\n==> shell syntax\n'
 while IFS= read -r -d '' script; do
@@ -65,6 +71,9 @@ run systemd-hwdb --root="$temporary/hwdb" --strict update
 systemd-hwdb --root="$temporary/hwdb" query \
   'evdev:atkbd:dmi:bvnInsyde:bvrV1.18:bd*:svnAcer:pnPredatorPHN16-72:pvr*' |
   grep --fixed-strings --line-regexp 'KEYBOARD_KEY_f5=prog1'
+
+printf '\n==> exact HID udev verification\n'
+run udevadm verify packaging/71-asense-hid.rules
 
 kernel_count=0
 for modules in /lib/modules/*; do

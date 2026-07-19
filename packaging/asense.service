@@ -15,6 +15,8 @@ RestartSec=1s
 User=root
 Group=root
 UMask=0077
+StateDirectory=asense
+StateDirectoryMode=0700
 NoNewPrivileges=true
 # NVIDIA's clock-offset ioctl requires CAP_SYS_ADMIN even for uid 0. Retain
 # only that capability so the verified Turbo transaction can apply and read

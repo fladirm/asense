@@ -3,6 +3,7 @@
 *.zip
 *.zip.sha256
 *-SHA256SUMS.txt
+/SHA256SUMS
 /kernel/.*.cmd
 /kernel/*.ko
 /kernel/*.mod

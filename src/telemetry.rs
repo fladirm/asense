@@ -1,9 +1,11 @@
 //! Read-only system telemetry for the ASense UI.
 
-use crate::hardware::{AcerHardware, FanState, HardwareError, PlatformProfile};
+use crate::hardware::{
+    AcerHardware, FanChannelState, FanRpmChannel, FanState, HardwareError, PlatformProfile,
+};
 use crate::nvidia::{
-    NvidiaController, NvidiaLiveTelemetry, NvidiaStaticInfo, RTX_4070_LAPTOP_CUDA_CORE_COUNT,
-    RTX_4070_LAPTOP_SM_COUNT,
+    NvidiaController, NvidiaLiveTelemetry, NvidiaPciDevice, NvidiaStaticInfo, PciIdentity,
+    RTX_4070_LAPTOP_CUDA_CORE_COUNT, RTX_4070_LAPTOP_SM_COUNT, discover_nvidia_pci_device,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -152,8 +154,11 @@ pub struct HardwareInfo {
     pub memory: MemoryHardwareInfo,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuTelemetry {
+    /// True when PCI runtime PM reports a healthy RTD3 sleep state. Live NVML
+    /// fields are intentionally absent in this state.
+    pub sleeping: bool,
     pub temperature_c: Option<f32>,
     pub utilization_percent: Option<f32>,
     pub power_w: Option<f32>,
@@ -183,8 +188,22 @@ pub struct SystemTelemetry {
     pub memory_used_mib: u64,
     pub memory_total_mib: u64,
     pub gpu: GpuTelemetry,
+    /// The two controllable channels used by the compact fan UI.  A machine
+    /// with profiles but no fan-control interface reports an unavailable
+    /// zeroed state instead of losing the complete telemetry sample.
     pub fans: FanState,
-    pub profile: PlatformProfile,
+    /// All read-only RPM channels exported by Acer hwmon.  Channels after the
+    /// CPU/GPU pair remain telemetry-only; the UI can render fan 3 alongside
+    /// the GPU gauge and fan 4+ in advanced diagnostics.
+    pub fan_rpm_channels: Vec<FanRpmChannel>,
+    /// Raw live kernel/WMI token.  Unknown tokens remain useful telemetry and
+    /// must not be rejected merely because the legacy five-profile enum does
+    /// not have a variant for them.
+    pub profile_raw: Option<String>,
+    /// Compatibility view for the reference PHN16-72 controls.  `None` means
+    /// that the profile is absent or uses a live token unknown to the fixed
+    /// v0.1 enum.
+    pub profile: Option<PlatformProfile>,
     pub hardware: HardwareInfo,
     pub power_supply: PowerSupplyTelemetry,
 }
@@ -211,6 +230,10 @@ pub struct TelemetryReader {
     nvidia: Option<NvidiaController>,
     nvidia_static: Option<NvidiaStaticInfo>,
     nvidia_discovery_error: Option<String>,
+    nvidia_pci_bus_id: Option<String>,
+    nvidia_pci_identity: Option<PciIdentity>,
+    nvidia_exact_oem_target: bool,
+    nvidia_runtime_sleeping: bool,
     nvidia_retry: SampleBackoff,
     hardware_info: Option<HardwareInfo>,
     cpu_online_ids: Option<BTreeSet<u32>>,
@@ -219,7 +242,7 @@ pub struct TelemetryReader {
     nvidia_slow_refresh: u8,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct NvidiaSlowTelemetry {
     core_offset_mhz: Option<i32>,
     memory_offset_mhz: Option<i32>,
@@ -275,45 +298,108 @@ impl Default for TelemetryReader {
 
 impl TelemetryReader {
     pub fn new() -> Self {
-        let mut reader = Self {
+        Self {
             previous_cpu_times: None,
             nvidia: None,
             nvidia_static: None,
             nvidia_discovery_error: None,
+            nvidia_pci_bus_id: None,
+            nvidia_pci_identity: None,
+            nvidia_exact_oem_target: false,
+            nvidia_runtime_sleeping: false,
             nvidia_retry: SampleBackoff::default(),
             hardware_info: None,
             cpu_online_ids: None,
             hardware_frequency_refresh: 0,
             nvidia_slow: NvidiaSlowTelemetry::default(),
             nvidia_slow_refresh: 0,
-        };
-        reader.discover_nvidia();
-        reader
+        }
     }
 
-    fn discover_nvidia(&mut self) {
-        match NvidiaController::discover_telemetry() {
+    fn discover_nvidia(&mut self, pci_device: &NvidiaPciDevice, root: &Path) {
+        let probe_offsets = self.nvidia_slow_refresh == 0;
+        match NvidiaController::discover_telemetry(pci_device, root, probe_offsets) {
             Ok(controller) => {
-                self.nvidia_static = Some(controller.static_info());
+                if self.nvidia_static.is_none() {
+                    self.nvidia_static = Some(controller.static_info());
+                }
                 self.nvidia = Some(controller);
                 self.nvidia_discovery_error = None;
-                self.nvidia_slow = NvidiaSlowTelemetry::default();
-                self.nvidia_slow_refresh = 0;
                 self.nvidia_retry.record_success();
             }
             Err(error) => {
                 self.nvidia = None;
                 self.nvidia_static = None;
                 self.nvidia_discovery_error = Some(error.to_string());
+                self.nvidia_slow = NvidiaSlowTelemetry::default();
+                self.nvidia_slow_refresh = 0;
                 self.nvidia_retry.record_failure();
             }
         }
     }
 
-    fn rediscover_nvidia_if_due(&mut self) {
-        if self.nvidia.is_none() && self.nvidia_retry.retry_due() {
-            self.discover_nvidia();
+    fn refresh_nvidia_lifecycle(&mut self, root: &Path) {
+        let Some(pci_device) = discover_nvidia_pci_device(root) else {
+            if self.nvidia_pci_bus_id.is_some() {
+                self.hardware_info = None;
+            }
+            self.nvidia_static = None;
+            self.nvidia_pci_identity = None;
+            self.drop_nvidia_for_runtime_state(None, false);
+            return;
+        };
+
+        let identity_changed = self.nvidia_pci_bus_id.as_deref() != Some(&pci_device.bus_id)
+            || self.nvidia_pci_identity != Some(pci_device.identity);
+        if identity_changed {
+            self.hardware_info = None;
+            self.nvidia_static = None;
         }
+        self.nvidia_pci_bus_id = Some(pci_device.bus_id.clone());
+        self.nvidia_pci_identity = Some(pci_device.identity);
+        self.nvidia_exact_oem_target = pci_device.is_exact_oem_target();
+        self.nvidia_runtime_sleeping =
+            pci_device.runtime_status == crate::nvidia::NvidiaRuntimeStatus::Suspended;
+
+        if !pci_device.runtime_status.permits_live_nvml() {
+            self.drop_nvidia_for_runtime_state(
+                Some(&pci_device.bus_id),
+                pci_device.runtime_status == crate::nvidia::NvidiaRuntimeStatus::Suspended,
+            );
+            return;
+        }
+
+        let wrong_device = identity_changed
+            || self
+                .nvidia
+                .as_ref()
+                .is_some_and(|controller| controller.pci_bus_id() != pci_device.bus_id);
+        if wrong_device {
+            self.nvidia = None;
+            self.nvidia_static = None;
+            self.nvidia_slow = NvidiaSlowTelemetry::default();
+            self.nvidia_slow_refresh = 0;
+            self.nvidia_retry.record_success();
+        }
+        if self.nvidia.is_none() && self.nvidia_retry.retry_due() {
+            self.discover_nvidia(&pci_device, root);
+        }
+    }
+
+    fn drop_nvidia_for_runtime_state(&mut self, bus_id: Option<&str>, sleeping: bool) {
+        self.nvidia = None;
+        self.nvidia_discovery_error = None;
+        self.nvidia_slow = NvidiaSlowTelemetry::default();
+        self.nvidia_slow_refresh = 0;
+        self.nvidia_retry.record_success();
+        self.nvidia_pci_bus_id = bus_id.map(str::to_owned);
+        self.nvidia_runtime_sleeping = sleeping;
+        if bus_id.is_none() {
+            self.nvidia_exact_oem_target = false;
+        }
+        // Suspended, transitional and unknown runtime states are all healthy
+        // reasons to defer NVML. Only literal `suspended` is presented as
+        // "GPU sleeping" in the UI.
     }
 
     fn lose_nvidia_session(&mut self, detail: String) {
@@ -329,21 +415,21 @@ impl TelemetryReader {
     /// callers handling resume or a known driver reload; ordinary sampling
     /// also detects invalid NVML sessions automatically.
     pub fn invalidate_nvidia_session(&mut self) {
-        self.nvidia_retry.record_success();
         self.lose_nvidia_session("NVML session invalidated after resume".to_owned());
+        self.nvidia_retry.record_success();
     }
 
-    fn refresh_nvidia_slow(&mut self) {
+    fn refresh_nvidia_slow(&mut self, controller: Option<&NvidiaController>) {
+        let Some(controller) = controller else {
+            self.nvidia_slow = NvidiaSlowTelemetry::default();
+            self.nvidia_slow_refresh = 0;
+            return;
+        };
         if self.nvidia_slow_refresh > 0 {
             self.nvidia_slow_refresh -= 1;
             return;
         }
         self.nvidia_slow_refresh = NVIDIA_SLOW_REFRESH_SAMPLES;
-
-        let Some(controller) = self.nvidia.as_ref() else {
-            self.nvidia_slow = NvidiaSlowTelemetry::default();
-            return;
-        };
         let mut slow = NvidiaSlowTelemetry::default();
         if !controller.supported_states().is_empty() {
             match controller.snapshot_offsets() {
@@ -379,11 +465,16 @@ impl TelemetryReader {
     }
 
     pub fn sample(&mut self, hardware: &AcerHardware) -> Result<SystemTelemetry, TelemetryError> {
-        self.rediscover_nvidia_if_due();
-        self.refresh_nvidia_slow();
+        self.refresh_nvidia_lifecycle(hardware.root());
+        // Keep NVML sample-scoped. Dropping this local at the end of the
+        // sample calls nvmlShutdown and leaves RTD3 free to suspend the dGPU
+        // after the external workload disappears.
+        let mut nvidia_controller = self.nvidia.take();
+        self.refresh_nvidia_slow(nvidia_controller.as_ref());
         if self.nvidia_slow.session_lost {
             let detail = self.nvidia_slow.errors.join("; ");
             self.lose_nvidia_session(detail);
+            nvidia_controller = None;
         }
         let proc_stat = rooted(hardware.root(), "proc/stat");
         let cpu_times = read_cpu_times(&proc_stat)?;
@@ -406,7 +497,8 @@ impl TelemetryReader {
             find_labeled_temperature(hardware.root(), "coretemp", "Package id 0")?
                 .or(acer_cpu_temp);
 
-        let (mut nvidia, mut power, nvidia_errors, lost_session) = match self.nvidia.as_ref() {
+        let (mut nvidia, mut power, nvidia_errors, lost_session) = match nvidia_controller.as_ref()
+        {
             Some(controller) => {
                 let live = controller.live_telemetry();
                 let mut errors = self
@@ -459,6 +551,7 @@ impl TelemetryReader {
             .reduce(|left, right| format!("{left}; {right}"));
         let gpu = match nvidia {
             Some(value) => GpuTelemetry {
+                sleeping: false,
                 temperature_c: value.temperature_c.or(acer_gpu_temp),
                 utilization_percent: value.utilization_percent,
                 power_w: value.power_w,
@@ -478,6 +571,7 @@ impl TelemetryReader {
                 nvidia_error,
             },
             None => GpuTelemetry {
+                sleeping: self.nvidia_runtime_sleeping,
                 temperature_c: acer_gpu_temp,
                 utilization_percent: None,
                 power_w: None,
@@ -498,14 +592,25 @@ impl TelemetryReader {
             },
         };
 
+        let fan_rpm_channels = hardware.fan_rpm_channels();
+        let fans = hardware
+            .read_fan_state()
+            .unwrap_or_else(|_| unavailable_fan_state(&fan_rpm_channels));
+        let profile_raw = hardware.current_profile_raw().ok();
+        let profile = profile_raw
+            .as_deref()
+            .and_then(|raw| PlatformProfile::from_sysfs(raw).ok());
+
         Ok(SystemTelemetry {
             cpu_temperature_c,
             cpu_utilization_percent,
             memory_used_mib,
             memory_total_mib,
             gpu,
-            fans: hardware.read_fan_state()?,
-            profile: hardware.current_profile()?,
+            fans,
+            fan_rpm_channels,
+            profile_raw,
+            profile,
             hardware: hardware_info,
             power_supply: read_power_supply(hardware.root()),
         })
@@ -517,10 +622,7 @@ impl TelemetryReader {
         memory_total_mib: u64,
         nvidia: Option<&NvidiaTelemetry>,
     ) -> HardwareInfo {
-        let exact_oem_gpu = self
-            .nvidia
-            .as_ref()
-            .is_some_and(NvidiaController::is_exact_oem_target);
+        let exact_oem_gpu = self.nvidia_exact_oem_target;
         let mut info = match self.hardware_info.take() {
             Some(mut cached) => {
                 let current_online_ids = cpu_topology_key(root);
@@ -539,10 +641,17 @@ impl TelemetryReader {
             None => {
                 self.hardware_frequency_refresh = HARDWARE_FREQUENCY_REFRESH_SAMPLES;
                 self.cpu_online_ids = cpu_topology_key(root);
-                read_hardware_info(root, memory_total_mib)
+                read_hardware_info_for_gpu(
+                    root,
+                    memory_total_mib,
+                    self.nvidia_pci_bus_id.as_deref(),
+                )
             }
         };
         info.memory.total_mib = Some(memory_total_mib);
+        if let Some(bus_id) = self.nvidia_pci_bus_id.as_ref() {
+            info.gpu.pci_bus_id = Some(normalize_pci_bus_id(bus_id));
+        }
         if let Some(nvidia) = nvidia {
             if let Some(model) = nvidia.model.as_ref() {
                 info.gpu.model = Some(model.clone());
@@ -560,6 +669,11 @@ impl TelemetryReader {
             info.gpu.maximum_graphics_clock_mhz = nvidia.maximum_graphics_clock_mhz;
             info.gpu.current_memory_clock_mhz = nvidia.memory_clock_mhz;
             info.gpu.maximum_memory_clock_mhz = nvidia.maximum_memory_clock_mhz;
+        } else {
+            // Never present clocks from the previous active NVML epoch as
+            // current after the dGPU has entered RTD3.
+            info.gpu.current_graphics_clock_mhz = None;
+            info.gpu.current_memory_clock_mhz = None;
         }
         if exact_oem_gpu {
             // NvidiaController is constructed only after exact vendor/device
@@ -777,7 +891,16 @@ struct MemoryModule {
     channel: Option<String>,
 }
 
+#[cfg(test)]
 fn read_hardware_info(root: &Path, memory_total_mib: u64) -> HardwareInfo {
+    read_hardware_info_for_gpu(root, memory_total_mib, None)
+}
+
+fn read_hardware_info_for_gpu(
+    root: &Path,
+    memory_total_mib: u64,
+    selected_nvidia_bus_id: Option<&str>,
+) -> HardwareInfo {
     let cpuinfo = fs::read_to_string(rooted(root, "proc/cpuinfo")).unwrap_or_default();
     let mut cpu = parse_cpu_hardware_info(&cpuinfo);
     apply_cpu_topology(root, &mut cpu);
@@ -786,7 +909,7 @@ fn read_hardware_info(root: &Path, memory_total_mib: u64) -> HardwareInfo {
 
     HardwareInfo {
         cpu,
-        gpu: read_nvidia_proc_hardware(root),
+        gpu: read_nvidia_proc_hardware(root, selected_nvidia_bus_id),
         memory: read_memory_hardware(root, memory_total_mib),
     }
 }
@@ -1367,29 +1490,39 @@ fn memory_channel_label(locator: &str) -> Option<String> {
     ))
 }
 
-fn read_nvidia_proc_hardware(root: &Path) -> GpuHardwareInfo {
+fn read_nvidia_proc_hardware(root: &Path, selected_bus_id: Option<&str>) -> GpuHardwareInfo {
     let mut info = GpuHardwareInfo::default();
     let gpu_root = rooted(root, "proc/driver/nvidia/gpus");
     if let Ok(entries) = fs::read_dir(gpu_root) {
-        for entry in entries.flatten() {
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let Some(contents) = read_trimmed(&entry.path().join("information")) else {
                 continue;
             };
+            let mut candidate = GpuHardwareInfo::default();
             for line in contents.lines() {
                 let Some((name, value)) = line.split_once(':') else {
                     continue;
                 };
                 match name.trim() {
                     "Model" if !value.trim().is_empty() => {
-                        info.model = Some(value.trim().to_owned())
+                        candidate.model = Some(value.trim().to_owned())
                     }
                     "Bus Location" if !value.trim().is_empty() => {
-                        info.pci_bus_id = Some(normalize_pci_bus_id(value.trim()))
+                        candidate.pci_bus_id = Some(normalize_pci_bus_id(value.trim()))
                     }
                     _ => {}
                 }
             }
-            break;
+            let selected = selected_bus_id.map(normalize_pci_bus_id);
+            if selected
+                .as_deref()
+                .is_none_or(|selected| candidate.pci_bus_id.as_deref() == Some(selected))
+            {
+                info = candidate;
+                break;
+            }
         }
     }
     if let Some(version) = read_trimmed(&rooted(root, "proc/driver/nvidia/version")) {
@@ -1448,11 +1581,17 @@ fn find_labeled_temperature(
     expected_label: &str,
 ) -> Result<Option<f32>, TelemetryError> {
     let hwmon_root = rooted(root, "sys/class/hwmon");
-    let entries = fs::read_dir(&hwmon_root).map_err(|source| TelemetryError::Io {
-        operation: "enumerate temperature sensors",
-        path: hwmon_root.clone(),
-        source,
-    })?;
+    let entries = match fs::read_dir(&hwmon_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(TelemetryError::Io {
+                operation: "enumerate temperature sensors",
+                path: hwmon_root.clone(),
+                source,
+            });
+        }
+    };
     for entry in entries {
         let entry = entry.map_err(|source| TelemetryError::Io {
             operation: "read temperature sensor entry",
@@ -1529,6 +1668,22 @@ fn millidegrees_to_celsius(value: i64) -> Option<f32> {
     (-50_000..=200_000)
         .contains(&value)
         .then_some(value as f32 / 1000.0)
+}
+
+fn unavailable_fan_state(rpm_channels: &[FanRpmChannel]) -> FanState {
+    let channel = |index| FanChannelState {
+        mode: None,
+        pwm_raw: 0,
+        rpm: rpm_channels
+            .iter()
+            .find(|channel| channel.index == index)
+            .and_then(|channel| channel.rpm)
+            .unwrap_or(0),
+    };
+    FanState {
+        cpu: channel(1),
+        gpu: channel(2),
+    }
 }
 
 fn rooted(root: &Path, relative: &str) -> PathBuf {
@@ -1610,6 +1765,74 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_fan_control_keeps_read_only_rpm_values() {
+        let channels = vec![
+            FanRpmChannel {
+                index: 1,
+                label: "CPU".to_string(),
+                rpm: Some(2600),
+            },
+            FanRpmChannel {
+                index: 2,
+                label: "GPU".to_string(),
+                rpm: Some(2400),
+            },
+        ];
+        let state = unavailable_fan_state(&channels);
+        assert_eq!(state.cpu.rpm, 2600);
+        assert_eq!(state.gpu.rpm, 2400);
+        assert_eq!(state.cpu.mode, None);
+        assert_eq!(state.gpu.mode, None);
+    }
+
+    #[test]
+    fn sample_survives_absent_profile_and_acer_hwmon() {
+        let root = minimal_acer_telemetry_fixture("optional-acer-interfaces");
+        let hardware = AcerHardware::discover_at(&root).unwrap();
+        let sample = offline_reader().sample(&hardware).unwrap();
+
+        assert_eq!(sample.profile_raw, None);
+        assert_eq!(sample.profile, None);
+        assert!(sample.fan_rpm_channels.is_empty());
+        assert_eq!(sample.fans, unavailable_fan_state(&[]));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sample_keeps_unknown_profile_and_additional_rpm_channels() {
+        let root = minimal_acer_telemetry_fixture("dynamic-acer-interfaces");
+        let profile_root = root.join("sys/firmware/acpi");
+        let hwmon = root.join("sys/class/hwmon/hwmon7");
+        fs::create_dir_all(&profile_root).unwrap();
+        fs::create_dir_all(&hwmon).unwrap();
+        fs::write(profile_root.join("platform_profile"), "cool\n").unwrap();
+        fs::write(
+            profile_root.join("platform_profile_choices"),
+            "cool balanced performance\n",
+        )
+        .unwrap();
+        fs::write(hwmon.join("name"), "acer\n").unwrap();
+        fs::write(hwmon.join("fan1_input"), "2500\n").unwrap();
+        fs::write(hwmon.join("fan2_input"), "2300\n").unwrap();
+        fs::write(hwmon.join("fan3_input"), "1700\n").unwrap();
+        fs::write(hwmon.join("fan3_label"), "System\n").unwrap();
+
+        let hardware = AcerHardware::discover_at(&root).unwrap();
+        let sample = offline_reader().sample(&hardware).unwrap();
+
+        assert_eq!(sample.profile_raw.as_deref(), Some("cool"));
+        assert_eq!(sample.profile, None);
+        assert_eq!(sample.fans.cpu.rpm, 2500);
+        assert_eq!(sample.fans.gpu.rpm, 2300);
+        assert_eq!(sample.fan_rpm_channels.len(), 3);
+        assert_eq!(sample.fan_rpm_channels[2].label, "System");
+        assert_eq!(sample.fan_rpm_channels[2].rpm, Some(1700));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reads_live_battery_and_adapter_state_without_inventing_calibration_progress() {
         let root = fixture_root("power-supply");
         let battery = root.join("sys/class/power_supply/BAT1");
@@ -1661,6 +1884,103 @@ mod tests {
         assert!(backoff.retry_due());
         backoff.record_failure();
         assert!(backoff.retry_due());
+    }
+
+    #[test]
+    fn sleeping_nvidia_is_healthy_and_clears_live_epoch_state() {
+        let root = minimal_acer_telemetry_fixture("nvidia-suspended");
+        let pci = root.join("sys/bus/pci/devices/0000:02:00.0");
+        fs::create_dir_all(pci.join("power")).unwrap();
+        fs::write(pci.join("vendor"), "0x10de\n").unwrap();
+        fs::write(pci.join("device"), "0x28a0\n").unwrap();
+        fs::write(pci.join("class"), "0x030200\n").unwrap();
+        fs::write(pci.join("subsystem_vendor"), "0x1025\n").unwrap();
+        fs::write(pci.join("subsystem_device"), "0x0001\n").unwrap();
+        fs::write(pci.join("power/runtime_status"), "suspended\n").unwrap();
+
+        let mut reader = offline_reader();
+        reader.nvidia_discovery_error = Some("old NVML failure".to_owned());
+        reader.nvidia_pci_bus_id = Some("0000:02:00.0".to_owned());
+        reader.nvidia_pci_identity = Some(PciIdentity {
+            vendor: 0x10de,
+            device: 0x28a0,
+            subsystem_vendor: 0x1025,
+            subsystem_device: 0x0001,
+        });
+        reader.nvidia_static = Some(NvidiaStaticInfo {
+            model: Some("Cached NVIDIA GPU".to_owned()),
+            pci_bus_id: Some("0000:02:00.0".to_owned()),
+            ..NvidiaStaticInfo::default()
+        });
+        reader.nvidia_slow.core_offset_mhz = Some(100);
+        reader.nvidia_slow.memory_offset_mhz = Some(200);
+        reader.refresh_nvidia_lifecycle(&root);
+
+        assert!(reader.nvidia.is_none());
+        assert_eq!(
+            reader
+                .nvidia_static
+                .as_ref()
+                .and_then(|info| info.model.as_deref()),
+            Some("Cached NVIDIA GPU")
+        );
+        assert!(reader.nvidia_discovery_error.is_none());
+        assert!(reader.nvidia_runtime_sleeping);
+        assert_eq!(reader.nvidia_pci_bus_id.as_deref(), Some("0000:02:00.0"));
+        assert_eq!(reader.nvidia_slow, NvidiaSlowTelemetry::default());
+        assert!(reader.nvidia_retry.retry_due());
+
+        reader.hardware_info = Some(HardwareInfo {
+            gpu: GpuHardwareInfo {
+                current_graphics_clock_mhz: Some(2_250),
+                current_memory_clock_mhz: Some(8_001),
+                ..GpuHardwareInfo::default()
+            },
+            ..HardwareInfo::default()
+        });
+        let info = reader.hardware_snapshot(&root, 16_384, None);
+        assert_eq!(info.gpu.current_graphics_clock_mhz, None);
+        assert_eq!(info.gpu.current_memory_clock_mhz, None);
+        assert_eq!(info.gpu.pci_bus_id.as_deref(), Some("0000:02:00.0"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transitional_nvidia_states_defer_without_error_or_backoff() {
+        for (label, status) in [
+            ("suspending", "suspending"),
+            ("resuming", "resuming"),
+            ("unknown", "future-kernel-state"),
+        ] {
+            let root = minimal_acer_telemetry_fixture(label);
+            let pci = root.join("sys/bus/pci/devices/0000:02:00.0");
+            fs::create_dir_all(pci.join("power")).unwrap();
+            fs::write(pci.join("vendor"), "0x10de\n").unwrap();
+            fs::write(pci.join("device"), "0x28a0\n").unwrap();
+            fs::write(pci.join("class"), "0x030200\n").unwrap();
+            fs::write(pci.join("subsystem_vendor"), "0x1025\n").unwrap();
+            fs::write(pci.join("subsystem_device"), "0x0001\n").unwrap();
+            fs::write(pci.join("power/runtime_status"), format!("{status}\n")).unwrap();
+
+            let mut reader = offline_reader();
+            reader.refresh_nvidia_lifecycle(&root);
+            assert!(reader.nvidia.is_none(), "status={status}");
+            assert!(reader.nvidia_discovery_error.is_none(), "status={status}");
+            assert!(!reader.nvidia_runtime_sleeping, "status={status}");
+            assert!(reader.nvidia_retry.retry_due(), "status={status}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn absent_sample_controller_clears_slow_nvml_state_and_cadence() {
+        let mut reader = offline_reader();
+        reader.nvidia_slow.core_offset_mhz = Some(100);
+        reader.nvidia_slow.memory_offset_mhz = Some(200);
+        reader.nvidia_slow_refresh = NVIDIA_SLOW_REFRESH_SAMPLES;
+        reader.refresh_nvidia_slow(None);
+        assert_eq!(reader.nvidia_slow, NvidiaSlowTelemetry::default());
+        assert_eq!(reader.nvidia_slow_refresh, 0);
     }
 
     #[test]
@@ -1799,6 +2119,10 @@ mod tests {
             nvidia: None,
             nvidia_static: None,
             nvidia_discovery_error: None,
+            nvidia_pci_bus_id: None,
+            nvidia_pci_identity: None,
+            nvidia_exact_oem_target: false,
+            nvidia_runtime_sleeping: false,
             nvidia_retry: SampleBackoff::default(),
             hardware_info: None,
             cpu_online_ids: None,
@@ -1924,12 +2248,81 @@ mod tests {
         assert_eq!(normalize_pci_bus_id("00000000:01:00.0"), "0000:01:00.0");
     }
 
+    #[test]
+    fn static_nvidia_identity_matches_the_selected_dynamic_bus() {
+        let root = fixture_root("nvidia-proc-selected-bus");
+        for (entry, model, bus) in [
+            ("00000000:01:00.0", "Generic NVIDIA", "00000000:01:00.0"),
+            ("00000000:07:00.0", "Selected NVIDIA", "00000000:07:00.0"),
+        ] {
+            let path = root.join("proc/driver/nvidia/gpus").join(entry);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("information"),
+                format!("Model: {model}\nBus Location: {bus}\n"),
+            )
+            .unwrap();
+        }
+        let info = read_nvidia_proc_hardware(&root, Some("0000:07:00.0"));
+        assert_eq!(info.model.as_deref(), Some("Selected NVIDIA"));
+        assert_eq!(info.pci_bus_id.as_deref(), Some("0000:07:00.0"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a live Acer/NVIDIA laptop"]
+    fn live_sample_releases_its_nvml_controller_before_returning() {
+        let hardware = AcerHardware::discover().unwrap();
+        let mut reader = TelemetryReader::new();
+        let _ = reader.sample(&hardware).unwrap();
+        assert!(reader.nvidia.is_none());
+    }
+
     fn fixture_root(label: &str) -> PathBuf {
         let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
             "asense-telemetry-{label}-{}-{id}",
             std::process::id()
         ))
+    }
+
+    fn minimal_acer_telemetry_fixture(label: &str) -> PathBuf {
+        let root = fixture_root(label);
+        let dmi = root.join("sys/class/dmi/id");
+        let proc = root.join("proc");
+        fs::create_dir_all(&dmi).unwrap();
+        fs::create_dir_all(&proc).unwrap();
+        fs::write(dmi.join("sys_vendor"), "Acer\n").unwrap();
+        fs::write(dmi.join("product_name"), "Acer Test Model\n").unwrap();
+        fs::write(proc.join("stat"), "cpu  10 0 5 100 0 0 0 0\n").unwrap();
+        fs::write(
+            proc.join("meminfo"),
+            "MemTotal:       16777216 kB\nMemAvailable:    8388608 kB\n",
+        )
+        .unwrap();
+        root
+    }
+
+    fn offline_reader() -> TelemetryReader {
+        TelemetryReader {
+            previous_cpu_times: None,
+            nvidia: None,
+            nvidia_static: None,
+            nvidia_discovery_error: None,
+            nvidia_pci_bus_id: None,
+            nvidia_pci_identity: None,
+            nvidia_exact_oem_target: false,
+            nvidia_runtime_sleeping: false,
+            nvidia_retry: SampleBackoff {
+                samples_until_retry: NVIDIA_RETRY_MAX_SAMPLES,
+                next_delay: NVIDIA_RETRY_MAX_SAMPLES,
+            },
+            hardware_info: None,
+            cpu_online_ids: None,
+            hardware_frequency_refresh: 0,
+            nvidia_slow: NvidiaSlowTelemetry::default(),
+            nvidia_slow_refresh: 0,
+        }
     }
 
     fn dmi_memory_fixture(locator: &str) -> Vec<u8> {

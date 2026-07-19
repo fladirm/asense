@@ -5,7 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=packaging/common.sh
 source "$ROOT/packaging/common.sh"
 
-TARGET_USER="${1:-${SUDO_USER:-${USER:-}}}"
+TARGET_USER="${1:-}"
 DKMS_CONF="$ROOT/kernel/dkms.conf"
 DKMS_NAME="$(asense_dkms_value PACKAGE_NAME "$DKMS_CONF")"
 DKMS_VERSION="$(asense_dkms_value PACKAGE_VERSION "$DKMS_CONF")"
@@ -55,10 +55,14 @@ collect_dkms_versions() {
   done
 }
 
-for command in chown chmod dkms env flock getent grep modprobe systemctl systemd-hwdb touch udevadm; do
+for command in chown chmod dkms env flock getent grep modprobe sed systemctl systemd-hwdb touch udevadm; do
   asense_require_command "$command"
 done
 asense_run_with_package_lock "$ROOT/uninstall.sh" "$@"
+if [[ -z "$TARGET_USER" && -f /etc/systemd/system/asense.socket ]]; then
+  TARGET_USER="$(sed -n 's/^SocketUser=//p' /etc/systemd/system/asense.socket)"
+fi
+TARGET_USER="${TARGET_USER:-${SUDO_USER:-${USER:-}}}"
 [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]] ||
   asense_die "target desktop user is missing; pass it explicitly as the first argument"
 asense_resolve_target_user "$TARGET_USER"
@@ -103,8 +107,10 @@ for version in "${DKMS_VERSIONS[@]}"; do
   asense_root rm -rf -- "/usr/src/$DKMS_NAME-$version"
 done
 
-if ! asense_remove_shortcut; then
-  asense_warn "system files were removed, but the GNOME shortcut could not be cleaned"
+if [[ -f /etc/udev/hwdb.d/90-asense-predator-key.hwdb ]]; then
+  if ! asense_remove_shortcut; then
+    asense_warn "system files were removed, but the GNOME shortcut could not be cleaned"
+  fi
 fi
 
 asense_root rm -f -- \
@@ -112,6 +118,7 @@ asense_root rm -f -- \
   /etc/systemd/system/asense.service \
   /etc/systemd/system/sockets.target.wants/asense.socket \
   /usr/lib/systemd/system-sleep/asense \
+  /etc/udev/rules.d/71-asense-hid.rules \
   /etc/udev/hwdb.d/90-asense-predator-key.hwdb \
   /usr/bin/asense \
   /usr/libexec/asense/asense \
@@ -120,8 +127,12 @@ asense_root rm -f -- \
   /usr/share/icons/hicolor/scalable/apps/asense.svg \
   "$ASENSE_TARGET_HOME/.local/share/applications/asense.desktop" \
   /run/asense-control.sock \
+  /run/asense-nvidia-reconcile \
   /run/asense-mutation.lock
+asense_root rm -rf -- /var/lib/asense
 asense_root systemd-hwdb update
+asense_root udevadm control --reload-rules
+asense_root udevadm trigger --subsystem-match=hidraw --action=change
 asense_root udevadm trigger --subsystem-match=input --action=change
 asense_root udevadm settle --timeout=10
 asense_root systemctl daemon-reload
@@ -158,6 +169,7 @@ case "$FAN_RESET_STATUS" in
 esac
 case "$ASENSE_SHORTCUT_STATUS" in
   removed) ;;
+  not-attempted | not-owned) ;;
   unavailable)
     printf "%s\n" "The selected account's GNOME shortcut remains and must be removed after login."
     ;;

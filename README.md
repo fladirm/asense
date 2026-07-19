@@ -1,128 +1,159 @@
 # ASense
 
-A native Linux control panel for the Acer Predator Helios Neo 16
-**PHN16-72**. ASense combines performance profiles, fan control, four-zone
-RGB, selected platform controls and live hardware telemetry in one application,
-with English as the default and an optional Czech localization. Firmware writes
-are deliberately gated to the verified **PHN16-72** model. The BIOS version is
-reported diagnostically, while capability probes and verified readback protect
-writes across BIOS updates.
+A native Linux control panel for Acer Predator, Nitro and related notebooks.
+It provides performance profiles, fan control, lighting, selected firmware
+options and live telemetry without requiring PredatorSense or NitroSense.
 
-## Screenshots
+The Predator Helios Neo 16 **PHN16-72** is the reference-tested platform.
+ASense v0.2 also discovers compatible Linux, Acer WMI and HID interfaces on
+other models and shows only the controls found on the machine.
 
+<!-- markdownlint-disable MD013 MD033 -->
 <p align="center">
   <img src="docs/screenshots/asense-compact.png" alt="ASense compact control panel" width="32%">
   <img src="docs/screenshots/asense-advanced.png" alt="ASense advanced metrics panel" width="63%">
 </p>
+<!-- markdownlint-enable MD013 MD033 -->
 
 ## Features
 
-- Eco, Quiet, Balanced, Performance and Turbo firmware profiles;
-- firmware Auto, independent manual CPU/GPU and Maximum fan modes;
-- live CPU/GPU temperature, load and fan RPM gauges;
-- NVIDIA load, VRAM, clocks, power, P-state and throttle-reason telemetry;
-- OEM Turbo GPU offsets (`+100 MHz` core, `+200 MHz` memory) with NVML
-  readback, rollback and a typed receipt of the confirmed profile, offsets and
-  available GPU power ceiling;
-- four-zone keyboard RGB, brightness and firmware effects;
-- 80% battery charge limit and confirmation-gated firmware battery
-  calibration;
-- powered-off USB charging thresholds;
-- keyboard timeout, boot sound, LCD override and rear-logo controls when the
-  firmware exposes them;
-- tabbed advanced metrics and read-only CPU, GPU, memory, firmware and PCI
-  hardware inventory;
-- PredatorSense hardware-key integration on GNOME (`XF86Launch1`).
+- profile choices from live Linux kernel interfaces, with a known-command Acer
+  Gaming-WMI fallback whose writes are verified by readback;
+- firmware Auto, manual CPU/GPU and Maximum fan modes through kernel PWM or
+  Acer Gaming-WMI;
+- temperatures, load and up to eight detected fan RPM channels;
+- NVIDIA load, VRAM, clocks, power, P-state and throttle telemetry;
+- exact PHN16-72 Turbo GPU offsets with NVML readback and rollback;
+- one-to-four-zone WMI lighting;
+- ENEK5130 keyboard and cover-logo lighting with runtime-discovered zones and
+  effects;
+- battery charge limit and firmware calibration;
+- USB-off charging, keyboard timeout, boot sound, LCD override and rear-logo
+  controls when exposed by firmware;
+- compact controls plus advanced graphs and hardware information;
+- English and Czech UI.
 
-Unsupported controls stay visibly disabled. ASense does not guess unknown WMI
-methods, scan EC registers or silently emulate missing firmware functions.
-Battery calibration reports only the firmware-supported and active readback;
-there is no invented progress percentage. Its modal supplements that readback
-with live battery state-of-charge, charge status and AC/USB source telemetry.
-As a fail-closed ASense safety policy, USB-C-only power is blocked for starting
-calibration. Keep an AC adapter connected for the entire cycle. The public
-firmware interface exposes no decoded completion event; after the cycle,
-refresh the readback and stop calibration manually if it remains active.
+Missing capabilities are hidden independently: a notebook can have profiles
+and RPM without fan writes, or lighting without battery options.
 
 ## Supported hardware
 
-| Component | Required value |
-| --- | --- |
-| Vendor | Acer |
-| Product | Predator PHN16-72 |
-| BIOS | reported, not version-gated |
-| Tested GPU path | NVIDIA GeForce RTX 4070 Laptop, Acer subsystem `1025:1731` |
-| Current validation stack | Ubuntu 26.04 / glibc 2.43, Linux `7.1.3-070103-generic`, NVIDIA open KMD `610.43.02` |
-| Desktop integration | GNOME on Linux |
+<!-- markdownlint-disable MD013 MD033 -->
+| Model | Profiles | Fans | Lighting | Platform |
+| --- | :---: | :---: | :---: | :---: |
+| <code>PHN16&#8209;72</code> | ✅ | ✅ | ✅ | ✅ |
+| <code>PH16&#8209;72</code> | 🟢 | 🟢 | 🔎 | 🔎 |
+| <code>PT14&#8209;51</code> | 🟢 | 🟢 | 🔎 | 🔎 |
+| <code>AN515&#8209;58</code> | 🟢 | 🟢 | 🟡 | 🔎 |
+| <code>PHN16&#8209;71</code> | 🟢 | 🟢·🔎 | 🔎 | 🔎 |
+| <code>PH16&#8209;71</code> | 🟢 | 🟢·🔎 | 🔎 | 🔎 |
+| <code>PH18&#8209;71</code> | 🟢 | 🟢·🔎 | 🔎 | 🔎 |
+| <code>PHN14&#8209;51</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PHN16S&#8209;71</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PHN16&#8209;73</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>AN16S&#8209;61</code> | 🔎 | 🔎 | 🔎 | 🔎 |
+| <code>AN515&#8209;45</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>AN515&#8209;55</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>AN515&#8209;56</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>AN515&#8209;57</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>AN517&#8209;41</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PH315&#8209;52</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PH315&#8209;53</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PH315&#8209;54</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PH317&#8209;53</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PH517&#8209;61</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PT314&#8209;51</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PT315&#8209;51</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PT316&#8209;51</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PT515&#8209;51</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PT516&#8209;52s</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+<!-- markdownlint-enable MD013 MD033 -->
 
-The installer and kernel module both enforce this boundary. Supporting another
-Predator model requires an explicit review of its DMI identity and firmware
-protocol; changing a string is not considered support.
+**Legend:** ✅ Reference tested · 🟢 Linux provides it · 🟡 Known Acer
+controller/protocol · 🔎 Enabled only when the live probe finds it ·
+🟢·🔎 RPM is available, fan control is probed · 🤝 Community confirmed.
 
-Standard Linux interfaces such as `hwmon` and `platform_profile` may also be
-present on other Acer systems, but this release neither certifies nor promises
-their firmware-specific behaviour. The private RGB/platform WMI protocol and
-OEM NVIDIA profile are PHN16-72-specific.
+PHN16-72 is the full reference platform. PHN14-51 has a known three-zone WMI
+layout; PHN16S-71 and PHN16-73 use ENEK5130 lighting. Yellow does not force a
+control: it still appears only after the controller answers correctly.
 
-The validation stack records the current release test environment; it is not a
-substitute for the identity and capability gates above and does not turn other
-driver, kernel or distribution combinations into certified targets.
+<!-- markdownlint-disable MD033 -->
+<details>
+<summary><strong>99 model and internal identifiers from the research inventory</strong></summary>
+<!-- markdownlint-enable MD033 -->
 
-The installer aborts before making changes on any product other than the exact
-`Acer / Predator PHN16-72` identity. Other Acer and Predator models do not get
-an unofficial partial-control mode. The NVIDIA GPU is optional for the Acer
-control plane, but OEM NVIDIA writes are enabled only for the tested RTX 4070
-PCI/subsystem identity shown above.
+The following identifiers occur in official Acer Sense packages or public
+hardware reports. They are useful machines to test; they are not an all-feature
+allow-list.
 
-## Architecture
+### Current PredatorSense cohort
 
-ASense is primarily written in **Rust 2024**. The desktop UI uses
-**Dioxus 0.7 + GTK/WebKitGTK**. An unprivileged GUI talks through a protected
-Unix socket to a root-owned, systemd socket-activated Rust helper. A small
-**GPL-2.0-only C/DKMS kernel module** exposes only the WMI operations verified
-for this model. NVIDIA telemetry and OEM clock offsets use NVML directly.
+```text
+PH16-71 PH18-71 PH3D15-71 PHN16-71 PT14-51 PT16-51 PTX17-71
+PH16-72 PH18-72 PHN14-51 PHN16-72 PHN18-71 PTN16-51 T7001
+PH16-73 PH18-73 PHN14-71 PHN16-73 PHN18-72 PHN16S-71 PT14-52T PTN16-71
+```
 
-The privileged protocol requires a newline-terminated `HELLO 1` as its first
-frame and returns a `protocol=1` daemon receipt; rejected negotiation closes the
-session. After negotiation it accepts only exact `OK` or `ERR` response tokens.
-A valid command `ERR` leaves the healthy session open; only a transport failure,
-timeout or malformed protocol response invalidates it. Manual fan control is a
-session lease and returns to firmware Auto when the GUI disconnects. An explicit
-Maximum request remains active after hardware readback succeeds and the `OK`
-response is written, matching the appliance behavior; incomplete or emergency
-fan transitions still fail safe to Auto. Stopping or restarting the service
-and post-resume reconciliation always restore firmware Auto.
+### Current NitroSense cohort
 
-Setters require firmware readback and multi-step writes roll back on failure.
-Profile changes return a typed, stable receipt containing the confirmed Acer
-profile, NVIDIA offset state, P-state capability and, when exposed by NVML, the
-enforced/maximum GPU power limit and clock-event reasons.
+```text
+AN14-41 AN16-41 AN16-42 AN16-43 AN16-51 AN16-61 AN16-72 AN16-73
+AN16S-61 AN18-61 AN17-41 AN17-42 AN17-51 AN17-71 AN17-72
+ANV14-61 ANV14-62 ANV14-71 ANV15-41 ANV15-42 ANV15-51 ANV15-52
+ANV16-41 ANV16-42 ANV16-61 ANV16-71 ANV16-72 ANV16S-61 ANV16S-71
+ANV17-41 ANV17-61
+```
 
-Acer and NVIDIA telemetry recover independently after startup races, driver or
-module loss and resume, using bounded retries. While Acer telemetry reconnects,
-the last displayed sample is retained only as stale context and the UI reports
-that state until a fresh sample arrives. An NVML session loss does not stop the
-Acer stream: NVIDIA-only values become unavailable with a diagnostic while
-NVML is reopened. Telemetry failures do not overwrite the result of a verified
-control operation.
+### Legacy NitroSense cohort
 
-## Prebuilt release
+```text
+AN515-42 AN515-43 AN515-44 AN515-45 AN515-46 AN515-47 AN515-51s
+AN515-52 AN515-53 AN515-54 AN515-55 AN515-56 AN515-57 AN515-58
+AN517-41 AN517-42 AN517-43 AN517-51 AN517-52 AN517-53 AN517-54
+AN517-55 AN715-41 AN715-51 AN715-52
+```
 
-The recommended GitHub installation path is the
+### Additional Predator/Triton candidates
+
+```text
+PH315-52 PH315-53 PH315-54 PH315-55 PH317-53 PH317-54 PH517-51
+PH517-52 PH517-61 PH717-71 PH717-72 PT314-51 PT315-51 PT314-52s
+PT315-52 PT316-51 PT316-51s PT515-51 PT515-52 PT516-52s PT917-71
+```
+
+Battery/APGE discovery can also help non-gaming Acers. Public working reports
+include `A315-24PT`, `A315-44P`, `A315-59`, `A315-510P`, `A515-45`,
+`A515-46-R14K`, `A715-42G`, `AG15-42P`, `AV15-53P`, `EUN314A-51W`,
+`AN515-44`, `AN515-57`, `AN515-58`, `AN517-54`, `ANV15-51`, `AN16-43-R7N7`,
+`ANV16-42`, `PHN16-71`, `SF314-34`, `SF314-43`, `SFE16-44-R48X`,
+`SFG14-63-R6PU`, `SFG16-72`, `SFX14-71G` and `SFX16-61G`.
+
+<!-- markdownlint-disable MD033 -->
+</details>
+<!-- markdownlint-enable MD033 -->
+
+The model names above do not control discovery. The live backend order is:
+
+```text
+profiles: kernel platform_profile -> Acer Gaming-WMI -> unavailable
+fans:     kernel PWM -> Acer Gaming-WMI -> RPM only
+lighting: zoned WMI or a detected ENEK5130 target
+```
+
+Kernel-backed profile choices come from the live kernel `choices` interface.
+The Gaming-WMI fallback instead exposes the driver's bounded set of known
+commands; it is not a firmware-enumerated list. The probe makes this distinction
+explicit as `profiles.choices_source = kernel-live` or
+`known-gaming-wmi-commands`.
+
+## Install a release
+
+The recommended release asset is the
 [`ubuntu-26.04-x86_64-installer` ZIP](https://github.com/fladirm/asense/releases/latest).
-It contains both prebuilt programs (`asense` and the GUI-free `asensed`) plus
-the complete transactional installer. No Rust toolchain is required. DKMS
-still compiles the small `asense_rgb` kernel module locally, so matching kernel
-headers and a C build toolchain remain necessary.
+It contains prebuilt `asense` and `asensed` binaries, so Rust is not required.
+Ubuntu 26.04 x86_64 is the supported prebuilt baseline.
 
-The supported build and prebuilt-release baseline is **Ubuntu 26.04 LTS on
-x86_64 with glibc 2.43**. The installer is built and supported on that
-baseline. Its dynamically linked binaries may run on an older distribution
-when every required ABI and shared-library version is available, but such
-combinations are not supported; build from source on the target distribution
-instead.
-
-Install the runtime and DKMS prerequisites:
+Install runtime and optional DKMS prerequisites:
 
 ```bash
 sudo apt update
@@ -132,44 +163,75 @@ sudo apt install \
   libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 libssl3t64
 ```
 
-From the GitHub Release page download the installer ZIP and its matching
-`.zip.sha256` file. Do **not** choose GitHub's automatically generated
-`Source code` archive when you want the ready-to-install binaries. Verify and
-extract the downloaded asset, then run the installer as the logged-in GNOME
-user, not through `sudo`:
+Download the installer ZIP and matching `.zip.sha256` from the Release page,
+then verify and install it as the logged-in desktop user (not with `sudo`):
 
 ```bash
-sha256sum --check asense-v0.1.1-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.1.1-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.1.1-ubuntu-26.04-x86_64-installer-*/
+sha256sum --check asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
+unzip asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip
+cd asense-v0.2.0-ubuntu-26.04-x86_64-installer-*/
 ./install.sh
 ```
 
-The installer validates the archive manifest, builds the DKMS candidate before
-replacing an existing installation, probes the WMI transport and smoke-tests
-the versioned daemon protocol. A Secure Boot system may first require
-[MOK enrollment](#secure-boot); after enrollment and reboot, run the installer
-again.
+The installer requests elevation only for system files, builds the optional
+DKMS transport when needed, configures the daemon/socket and verifies the
+installation. Re-running a newer installer upgrades in place.
+
+Launch ASense from the application menu or run:
+
+```bash
+asense
+```
+
+Create a local read-only report for a GitHub issue with:
+
+```bash
+asense probe > asense-probe.json
+```
+
+Close the ASense window first so the one-shot probe can use the daemon's
+single control session.
+
+The report contains model, profile, fan, known WMI and known HID capability
+data. It sends only `HELLO` and `CAPS` to the local daemon so typed ENEK5130
+zones and modes can be included when available; it sends no setter and falls
+back to passive HID inspection when the daemon is unavailable. It omits serial
+numbers, UUID, hostname, user and network identifiers, journals and raw ACPI
+tables. Review it before sharing.
+
+Uninstall with the copy retained by the installer:
+
+```bash
+/usr/libexec/asense/uninstall.sh
+```
+
+Uninstall returns an active fan session to Auto, removes ASense services,
+DKMS/HWDB/udev integration and the desktop entry. Other firmware settings
+(profile, lighting, charge limit and similar choices) remain configured.
+
+### Secure Boot
+
+DKMS uses the distribution signing setup. If module loading reports
+`Key was rejected by service`, import the key path printed by DKMS (commonly
+`/var/lib/shim-signed/mok/MOK.der`) and complete MOK enrollment after reboot:
+
+```bash
+sudo mokutil --import /var/lib/shim-signed/mok/MOK.der
+```
 
 ## Build from source
 
-Source builds are supported on the same Ubuntu 26.04 release baseline. Building
-on another distribution can adapt the userspace ABI to that system, but it does
-not broaden the exact PHN16-72 hardware boundary or make that platform a tested
-release target.
-
-Ubuntu 26.04 dependencies:
+Install build dependencies:
 
 ```bash
 sudo apt update
 sudo apt install \
   build-essential pkg-config git dkms "linux-headers-$(uname -r)" libelf-dev \
   libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
-  desktop-file-utils python3 mokutil
+  desktop-file-utils python3 mokutil udev
 ```
 
-Install Rust with `rustup`; `rust-toolchain.toml` selects the release-pinned
-toolchain. From a source checkout (or the checksummed source Release ZIP), run:
+Install Rust with `rustup`, then run:
 
 ```bash
 cargo test --locked
@@ -178,147 +240,86 @@ cargo build --release --locked --bin asense --features gui
 ./install.sh
 ```
 
-The two explicit build commands are intentional: `asensed` is the privileged,
-GUI-free service binary, while `asense` is the unprivileged desktop binary.
+## Control behaviour
 
-## Installation, upgrades and verification
+- profile and WMI settings are read back after writing;
+- failed multi-step fan/profile changes use the existing rollback path;
+- Manual fan mode is tied to the GUI session and returns to Auto after a
+  disconnect;
+- a confirmed Maximum request remains active after the GUI closes; daemon
+  restart and resume reconciliation return firmware control to Auto;
+- HID lighting without a getter shows `State unknown` after discovery and
+  `Last applied` after a successful write;
+- battery calibration shows only real firmware state and live battery/AC
+  telemetry. Keep the AC adapter connected during calibration;
+- NVIDIA offsets and the Predator hardware-key mapping remain exact
+  PHN16-72 features.
 
-Run the installer as the logged-in desktop user, **not** through `sudo`. It
-requests elevation only for system operations:
+The GUI is unprivileged. Hardware writes run through the root-owned,
+socket-activated `asensed` helper. ASense exposes typed profile, fan, lighting
+and platform operations; it does not expose a raw WMI/ACPI/EC/HID console.
 
-```bash
-./install.sh
-```
+## Local API
 
-An explicit release binary and desktop account can be supplied:
-
-```bash
-./install.sh /absolute/path/to/asense "$USER"
-```
-
-With an explicit GUI path, the installer selects an `asensed` binary from the
-same directory. `ASENSE_DAEMON_BINARY=/absolute/path/to/asensed` can override
-that pairing for development builds.
-
-The installer first performs a non-destructive DKMS candidate build for the
-running kernel and every kernel ABI on which the previous ASense version was
-registered. It then backs up the active module, binary and systemd integration,
-installs the exact candidate for the same ABI set and verifies the WMI
-transport. Any later failure triggers rollback to the previous installation.
-The protected control socket is assigned to exactly one selected desktop
-account. Re-running a newer installer upgrades the existing installation in
-place; do not uninstall the previous version first. The GNOME shortcut is
-stored only for the selected account.
-As a final transaction check, installation smoke-tests socket activation,
-service reload, clean stop and socket reactivation.
-
-After installation, launch ASense from the GNOME application menu or run:
+The installed desktop user owns the `0600` Unix socket
+`/run/asense-control.sock`. Every UTF-8 command is newline-terminated; the
+first command must be `HELLO 2`:
 
 ```bash
-asense
+python3 - <<'PY'
+import socket
+
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect("/run/asense-control.sock")
+f = s.makefile("rwb", buffering=0)
+for command in (b"HELLO 2\n", b"CAPS\n"):
+    f.write(command)
+    print(f.readline(4097).decode().rstrip())
+PY
 ```
 
-An installation that exits successfully has already verified the payload,
-DKMS module, firmware probe and daemon handshake. These commands provide a
-quick independent status check:
+The expected replies begin with `OK protocol=2` and `OK caps=1`; the latter is
+followed by capability JSON. Every reply is `OK <payload>` or `ERR <message>`.
 
-```bash
-systemctl is-enabled asense.socket
-systemctl is-active asense.socket
-dkms status -m asense-rgb
-modinfo -F version asense_rgb
-cat /usr/libexec/asense/INSTALL-PROVENANCE.txt
-```
+<!-- markdownlint-disable MD013 -->
+| Operation | Command |
+| --- | --- |
+| Discover | `PING`, `CAPS`, `HARDWARE GET`, `PLATFORM GET` |
+| Profile | `PROFILE <raw-token-from-CAPS>` |
+| Fans | `FAN AUTO`, `FAN MAXIMUM`, `FAN MANUAL <cpu-20..100> <gpu-20..100>` |
+| Lighting | `LIGHTING APPLY <device-id> <OFF\|STATIC\|BREATHING\|NEON> <brightness-0..100> <speed-0..9> <RRGGBB> <-\|RRGGBB,...>`, `LIGHTING POWER <device-id> <ON\|OFF>` |
+| Platform toggles | `PLATFORM <BATTERY_LIMIT\|KEYBOARD_TIMEOUT\|BOOT_SOUND\|LCD_OVERRIDE> <ON\|OFF>` |
+| Other platform controls | `PLATFORM BATTERY_CALIBRATION <START\|STOP>`, `PLATFORM USB_CHARGING <0\|10\|20\|30>`, `PLATFORM REAR_LOGO <RRGGBB> <brightness-0..100> <ON\|OFF>` |
+<!-- markdownlint-enable MD013 -->
 
-### Predator hardware key
+Commands are limited to 192 bytes excluding the newline; response content is
+limited to 4096 bytes. A normal `ERR` rejects only that command and leaves the
+session usable. There is no generic raw-call command or required client
+library.
 
-On the tested PHN16-72, the installer maps the PredatorSense key's `atkbd`
-scan code to `XF86Launch1` and registers `/usr/bin/asense --toggle` through
-GNOME Settings. The complete path is verified on the validation machine with
-BIOS 1.18, including launches recorded by `gsd-media-keys`.
+## Development and releases
 
-Automatic shortcut registration applies only to the selected, currently
-logged-in **GNOME** account whose session bus is available during installation.
-It is not system-wide for every local user. A different desktop environment,
-another account, an install from SSH/TTY without the user's active session bus,
-or an existing `XF86Launch1` conflict needs a desktop-specific shortcut. The
-installer prints a warning instead of claiming success when it cannot register
-the GNOME binding; the hardware mapping and the rest of the installation still
-remain valid.
+Release packaging, checksums, CI gates and reproducibility are documented in
+[`docs/RELEASING.md`](docs/RELEASING.md). Kernel-backed support follows the
+upstream Linux
+[`acer-wmi`](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c)
+driver.
 
-Uninstall with:
+## Donate
 
-```bash
-./uninstall.sh
-```
+If ASense is useful to you, donations are optional:
 
-The installer also retains a self-contained uninstall helper, its shared
-support file and release provenance. If the extracted installer directory has
-already been deleted, run:
+- **PayPal:** [`paypal.me/fladirm`](https://paypal.me/fladirm) (`@fladirm`)
+- **Bitcoin:** [`bc1qqdumr0umlaak7tyrrh0jx729z272fv2jr4t5zp`](bitcoin:bc1qqdumr0umlaak7tyrrh0jx729z272fv2jr4t5zp)
 
-```bash
-/usr/libexec/asense/uninstall.sh
-```
-
-Uninstall requests and verifies firmware Auto fan control before removing the
-service and module; if that confirmation fails, it reports the failure and
-recommends a reboot rather than claiming success. It removes the daemon/socket,
-DKMS registration and source, HWDB key mapping and desktop entry/icon. It also
-removes the selected account's GNOME shortcut when that account's session bus
-is available; otherwise it prints the manual-cleanup warning before removing
-the retained payload and runtime package lock.
-
-Other user-selected firmware settings (profile, NVIDIA offsets, RGB, charge
-limit, USB charging, boot sound, LCD override and rear logo) deliberately
-remain as configured. Uninstalling the application is not treated as a
-firmware factory reset.
-
-## AS IS
-
-ASense is provided **AS IS**, without warranty, fitness guarantee or an
-obligation to provide individual support. Firmware and power controls can
-change hardware behaviour; users remain responsible for backups, cooling and
-reviewing changes before use.
-
-## Release assets
-
-Prebuilt binaries belong to a GitHub **Release**, not to Git history. A pushed
-`v*` tag runs the complete Ubuntu 26.04 release gate and publishes the installer
-ZIP, its dedicated checksum, the `git archive` source ZIP, its dedicated
-checksum and the combined checksum manifest. Maintainer instructions and
-reproducibility details are in [`docs/RELEASING.md`](docs/RELEASING.md).
-
-## Secure Boot
-
-Check the state before installing:
-
-```bash
-mokutil --sb-state
-```
-
-Ubuntu DKMS signs the module during build. If `modprobe` reports
-`Key was rejected by service`, enroll the distribution DKMS key (commonly
-`/var/lib/shim-signed/mok/MOK.der`) and complete **Enroll MOK** after reboot:
-
-```bash
-sudo mokutil --import /var/lib/shim-signed/mok/MOK.der
-modinfo -F signer asense_rgb
-```
-
-Key paths differ between distributions. Use the path printed by DKMS rather
-than disabling Secure Boot to hide a signing failure.
-
-## Firmware boundary
-
-ASense binds only to the exact PHN16-72 DMI model. A BIOS update does not by
-itself disable the application: required interfaces are capability-probed and
-every mutation is verified by firmware readback with rollback on disagreement.
+See [`DONATE.md`](DONATE.md) for the PayPal and Bitcoin QR codes.
 
 ## Author and license
 
 **Fladirmacht** — <fladirmacht@gmail.com>
 
-ASense, including the Rust application, packaging and kernel module, is
-licensed **GPL-2.0-only**. The complete license text is included in
-[`LICENSE`](LICENSE) and mirrored in [`kernel/LICENSE`](kernel/LICENSE) for the
-standalone DKMS payload.
+ASense is provided **AS IS** and is licensed **GPL-2.0-only**. See
+[`LICENSE`](LICENSE). ENEK5130 wire-protocol research was independently
+documented by
+[`predator-sense`](https://github.com/cleyton1986/predator-sense); ASense uses
+its own implementation and tests.

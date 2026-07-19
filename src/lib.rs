@@ -12,5 +12,6 @@ pub mod lighting;
 pub mod mutation_lock;
 pub mod nvidia;
 pub mod platform;
+pub mod probe;
 pub mod telemetry;
 pub mod tuning;
