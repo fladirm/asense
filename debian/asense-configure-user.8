@@ -1,0 +1,32 @@
+.TH ASENSE-CONFIGURE-USER 8 "19 July 2026" "ASense 0.2.1" "System Administration"
+.SH NAME
+asense-configure-user \- select the desktop account allowed to control ASense
+.SH SYNOPSIS
+.B asense-configure-user
+.I USER
+.br
+.B asense-configure-user --auto
+.SH DESCRIPTION
+.B asense-configure-user
+creates the private, socket-activated ASense control endpoint for one local
+non-root desktop account.  It must be run as root.
+.PP
+The
+.B --auto
+form preserves a valid existing selection.  Otherwise it selects an account
+only when exactly one active local desktop session, or exactly one regular
+home-directory account, can be identified.  Ambiguous selection fails without
+opening the control socket.
+.SH FILES
+.TP
+.I /etc/asense/desktop-user
+Persisted selected account.
+.TP
+.I /etc/systemd/system/asense.socket
+Generated systemd socket unit with restrictive ownership and mode.
+.TP
+.I /usr/libexec/asense/asense.socket.in
+Packaged socket-unit template.
+.SH SEE ALSO
+.BR asense (1),
+.BR systemd.socket (5)

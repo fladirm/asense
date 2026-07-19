@@ -1,0 +1,50 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    install|upgrade)
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke stop asense.service asense.socket \
+                >/dev/null 2>&1 || true
+        fi
+        if [ -x /usr/libexec/asense/asensed ]; then
+            /usr/libexec/asense/asensed --failsafe-auto >/dev/null 2>&1 || true
+        fi
+        if [ -d /sys/module/asense_rgb ]; then
+            modprobe -r asense_rgb >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+# A standalone installer can leave any older ASense DKMS version behind. On
+# an initial Debian install there is no package-owned ASense DKMS tree to
+# preserve, so remove every standalone registration before dh-dkms registers
+# the package version. Package upgrades use the normal dh-dkms lifecycle.
+if [ "$1" = install ]; then
+    versions=$(
+        dkms status -m asense-rgb 2>/dev/null |
+            sed -n 's|^asense-rgb/\([^,:[:space:]]*\).*|\1|p' |
+            sort -u
+    )
+    for version in $versions; do
+        case "$version" in
+            ''|*[!A-Za-z0-9._+~-]*)
+                echo "ASense: refusing unsafe legacy DKMS version: $version" >&2
+                exit 1
+                ;;
+        esac
+        dkms remove --force -m asense-rgb -v "$version" --all
+    done
+    for source in /usr/src/asense-rgb-*; do
+        [ -e "$source" ] || [ -L "$source" ] || continue
+        if dpkg-query -S "$source" >/dev/null 2>&1; then
+            echo "ASense: preserving package-owned DKMS source $source" >&2
+        else
+            rm -rf -- "$source"
+        fi
+    done
+fi
+
+#DEBHELPER#
+
+exit 0

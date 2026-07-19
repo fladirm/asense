@@ -1,0 +1,2 @@
+extend-diff-ignore = "(^|/)target(/|$)"
+extend-diff-ignore = "(^|/)(\.codex-v02)(/|$)|(^|/)audit\.md$|(^|/)asense-v[^/]*-source-[^/]*\.zip(\.sha256)?$"

@@ -1,0 +1,17 @@
+target/debian/release/asense usr/bin
+target/debian/release/asensed usr/libexec/asense
+packaging/asense.service usr/lib/systemd/system
+packaging/asense.socket.in usr/libexec/asense
+packaging/common.sh usr/libexec/asense/packaging
+debian/asense-shortcut usr/libexec/asense
+debian/uninstall.sh usr/libexec/asense
+debian/tmp/usr/lib/systemd/system-sleep/asense usr/lib/systemd/system-sleep
+packaging/71-asense-hid.rules usr/lib/udev/rules.d
+packaging/90-asense-predator-key.hwdb usr/lib/udev/hwdb.d
+assets/asense.desktop usr/share/applications
+assets/asense.svg usr/share/icons/hicolor/scalable/apps
+debian/io.github.fladirm.asense.metainfo.xml usr/share/metainfo
+debian/asense-configure-user usr/sbin
+kernel/asense_rgb.c usr/src/asense-rgb-0.2.1
+kernel/Makefile usr/src/asense-rgb-0.2.1
+kernel/LICENSE usr/src/asense-rgb-0.2.1

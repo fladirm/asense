@@ -1,0 +1,43 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ASense
+Upstream-Contact: Fladirmacht <fladirmacht@gmail.com>
+Source: https://github.com/fladirm/asense
+
+Files: *
+Copyright: 2026 Fladirmacht
+License: GPL-2.0-only
+
+Files: debian/*
+Copyright: 2026 Fladirmacht
+License: GPL-2.0-only
+
+Files: debian/io.github.fladirm.asense.metainfo.xml
+Copyright: 2026 Fladirmacht
+License: CC0-1.0
+
+Files: vendor/*
+Copyright: The respective Rust crate authors
+License: individual
+ The vendored crates remain under their individual upstream licenses. Their
+ Cargo manifests and bundled LICENSE or COPYING files are authoritative. The
+ vendor tree is generated without modification from Cargo.lock for each source
+ upload and is not part of ASense itself.
+
+License: GPL-2.0-only
+ This program is free software; you can redistribute it and/or modify it under
+ the terms of the GNU General Public License as published by the Free Software
+ Foundation; version 2 only.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public License version
+ 2 can be found in /usr/share/common-licenses/GPL-2.
+
+License: CC0-1.0
+ On Debian systems, the complete text of the Creative Commons CC0 1.0 Universal
+ license can be found in /usr/share/common-licenses/CC0-1.0.
+
+License: individual
+ Refer to each vendored crate's Cargo manifest and bundled license files.

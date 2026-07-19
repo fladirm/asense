@@ -1,0 +1,43 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME := $(CURDIR)/debian/cargo-home
+export CARGO_TARGET_DIR := $(CURDIR)/target/debian
+export CARGO_NET_OFFLINE := true
+export CARGO_PROFILE_RELEASE_STRIP := false
+export CARGO_PROFILE_RELEASE_DEBUG := 1
+
+%:
+	dh $@ --with dkms
+
+override_dh_auto_configure:
+	install -d -m 0755 "$(CARGO_HOME)"
+	install -m 0644 debian/cargo-config.toml "$(CARGO_HOME)/config.toml"
+
+override_dh_auto_build:
+	cargo build --frozen --release --all-features --bins
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test --frozen --all-features --all-targets
+	desktop-file-validate assets/asense.desktop
+	appstreamcli validate --no-net debian/io.github.fladirm.asense.metainfo.xml
+endif
+
+override_dh_auto_install:
+	install -D -m 0755 packaging/asense-system-sleep \
+		debian/tmp/usr/lib/systemd/system-sleep/asense
+
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0755 debian/asense/usr/lib/systemd/system-sleep/asense
+	chmod 0755 debian/asense/usr/sbin/asense-configure-user
+	chmod 0755 debian/asense/usr/libexec/asense/asense-shortcut
+	chmod 0755 debian/asense/usr/libexec/asense/uninstall.sh
+	chmod 0644 debian/asense/usr/libexec/asense/asense.socket.in
+	chmod 0755 debian/asense/usr/libexec/asense/packaging/common.sh
+
+override_dh_clean:
+	dh_clean -Xvendor/

@@ -1,4 +1,5 @@
 /target/
+/vendor/
 *.log
 *.zip
 *.zip.sha256

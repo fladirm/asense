@@ -1,0 +1,108 @@
+#!/bin/sh
+set -e
+
+migrate_identical_override() {
+    old=$1
+    packaged=$2
+    backup_name=$3
+
+    [ -f "$old" ] || return 0
+    [ ! -L "$old" ] || return 0
+    [ -f "$packaged" ] || return 0
+    if cmp -s "$old" "$packaged"; then
+        install -d -o root -g root -m 0700 /var/lib/asense/migration-backups
+        mv "$old" "/var/lib/asense/migration-backups/$backup_name"
+    else
+        echo "ASense: preserving locally modified override $old" >&2
+    fi
+}
+
+archive_stale_manual_file() {
+    old=$1
+    backup_name=$2
+
+    [ -f "$old" ] || return 0
+    [ ! -L "$old" ] || return 0
+    install -d -o root -g root -m 0700 /var/lib/asense/migration-backups
+    backup=/var/lib/asense/migration-backups/$backup_name
+    if [ -e "$backup" ]; then
+        if cmp -s "$old" "$backup"; then
+            rm -f "$old"
+        else
+            unique_backup=$(mktemp "$backup.XXXXXX")
+            mv -f "$old" "$unique_backup"
+            echo "ASense: archived a newer standalone file as $unique_backup" >&2
+        fi
+        return 0
+    fi
+    mv "$old" "$backup"
+}
+
+case "$1" in
+    configure)
+        # A standalone install has an explicit private marker. Its /etc files
+        # are installer-owned overrides even when an older release differs
+        # from the incoming package; archive them so they cannot shadow the
+        # new package units/rules. Without that marker, preserve real local
+        # administrator changes and migrate only byte-identical old copies.
+        if [ -f /usr/libexec/asense/INSTALL-PROVENANCE.txt ] ||
+            [ -f /usr/libexec/asense/asense ]; then
+            archive_stale_manual_file \
+                /etc/systemd/system/asense.service \
+                asense.service.pre-deb
+            archive_stale_manual_file \
+                /etc/udev/rules.d/71-asense-hid.rules \
+                71-asense-hid.rules.pre-deb
+            archive_stale_manual_file \
+                /etc/udev/hwdb.d/90-asense-predator-key.hwdb \
+                90-asense-predator-key.hwdb.pre-deb
+        else
+            migrate_identical_override \
+                /etc/systemd/system/asense.service \
+                /usr/lib/systemd/system/asense.service \
+                asense.service.pre-deb
+            migrate_identical_override \
+                /etc/udev/rules.d/71-asense-hid.rules \
+                /usr/lib/udev/rules.d/71-asense-hid.rules \
+                71-asense-hid.rules.pre-deb
+            migrate_identical_override \
+                /etc/udev/hwdb.d/90-asense-predator-key.hwdb \
+                /usr/lib/udev/hwdb.d/90-asense-predator-key.hwdb \
+                90-asense-predator-key.hwdb.pre-deb
+        fi
+
+        # The pre-PPA installer used these private paths. Archive only its
+        # now-unused payloads; the package-owned daemon, socket template,
+        # shortcut helper and harmless uninstall stub stay in place.
+        archive_stale_manual_file \
+            /usr/libexec/asense/asense \
+            asense-gui.pre-deb
+        archive_stale_manual_file \
+            /usr/libexec/asense/INSTALL-PROVENANCE.txt \
+            INSTALL-PROVENANCE.txt.pre-deb
+        archive_stale_manual_file \
+            /usr/libexec/asense/kernel/dkms.conf \
+            dkms.conf.pre-deb
+        rmdir /usr/libexec/asense/kernel 2>/dev/null || true
+        ;;
+esac
+
+#DEBHELPER#
+
+case "$1" in
+    configure)
+        systemd-hwdb update >/dev/null 2>&1 || true
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=hidraw --action=add >/dev/null 2>&1 || true
+        modprobe asense_rgb >/dev/null 2>&1 || true
+
+        if /usr/sbin/asense-configure-user --auto; then
+            :
+        else
+            echo "ASense was installed, but its private control socket is disabled." >&2
+            echo "Choose its desktop user with: sudo asense-configure-user USER" >&2
+        fi
+        ;;
+esac
+
+exit 0

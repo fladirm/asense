@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.fladirm.asense</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-only</project_license>
+  <developer id="io.github.fladirm">
+    <name>Fladirmacht</name>
+  </developer>
+  <name>ASense</name>
+  <summary>Control cooling, performance and lighting on Acer laptops</summary>
+  <description>
+    <p>
+      ASense is a native Linux control center for supported Acer Predator and
+      Nitro laptops. It combines firmware performance profiles, fan control,
+      hardware telemetry and lighting in a compact desktop interface.
+    </p>
+    <p>
+      Features are enabled independently according to the Linux, Acer WMI and
+      HID interfaces detected on the machine. Predator PHN16-72 is the
+      reference-tested platform, while additional Acer models can expose
+      kernel-backed or detected capabilities.
+    </p>
+  </description>
+  <launchable type="desktop-id">asense.desktop</launchable>
+  <provides>
+    <binary>asense</binary>
+    <modalias>usb:v0CF2p5130d*</modalias>
+    <modalias>usb:v04F2p0117d*</modalias>
+  </provides>
+  <categories>
+    <category>Settings</category>
+    <category>HardwareSettings</category>
+  </categories>
+  <url type="homepage">https://github.com/fladirm/asense</url>
+  <url type="bugtracker">https://github.com/fladirm/asense/issues</url>
+  <url type="donation">https://github.com/fladirm/asense/blob/main/DONATE.md</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/fladirm/asense/v0.2.0/docs/screenshots/asense-advanced.png</image>
+      <caption>Advanced telemetry and Acer laptop controls</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/fladirm/asense/v0.2.0/docs/screenshots/asense-compact.png</image>
+      <caption>Compact ASense control panel</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.2.1" date="2026-07-19">
+      <url>https://github.com/fladirm/asense/releases/tag/v0.2.1</url>
+    </release>
+    <release version="0.2.0" date="2026-07-19">
+      <url>https://github.com/fladirm/asense/releases/tag/v0.2.0</url>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

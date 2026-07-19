@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        if [ -x /usr/libexec/asense/asense-shortcut ] &&
+            [ -r /etc/asense/desktop-user ]; then
+            /usr/libexec/asense/asense-shortcut remove \
+                "$(sed -n '1p' /etc/asense/desktop-user)" \
+                >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke stop asense.service asense.socket \
+                >/dev/null 2>&1 || true
+        fi
+        if [ -x /usr/libexec/asense/asensed ]; then
+            /usr/libexec/asense/asensed --failsafe-auto >/dev/null 2>&1 || true
+        fi
+        modprobe -r asense_rgb >/dev/null 2>&1 || true
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

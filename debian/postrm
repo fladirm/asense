@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke stop asense.socket >/dev/null 2>&1 || true
+        fi
+        deb-systemd-helper disable asense.socket >/dev/null 2>&1 || true
+        ;;
+esac
+
+case "$1" in
+    purge)
+        rm -f /etc/systemd/system/asense.socket
+        rm -f /etc/asense/desktop-user
+        rmdir /etc/asense 2>/dev/null || true
+        if [ -d /var/lib/asense ] && [ ! -L /var/lib/asense ]; then
+            find /var/lib/asense -xdev -depth -delete
+        fi
+        deb-systemd-helper purge asense.socket >/dev/null 2>&1 || true
+        systemd-hwdb update >/dev/null 2>&1 || true
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke daemon-reload >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

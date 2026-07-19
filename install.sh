@@ -5,6 +5,23 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=packaging/common.sh
 source "$ROOT/packaging/common.sh"
 
+refuse_package_managed_install() {
+  local status
+
+  command -v dpkg-query >/dev/null 2>&1 || return 0
+  status="$(dpkg-query -W -f='${Status}' asense 2>/dev/null || true)"
+  case "$status" in
+    "" | "deinstall ok config-files" | "purge ok not-installed" | "unknown ok not-installed")
+      return 0
+      ;;
+    *)
+      asense_die "ASense is managed by APT or dpkg is changing it; use 'sudo apt update && sudo apt install --only-upgrade asense', or remove the package before using the standalone installer"
+      ;;
+  esac
+}
+
+refuse_package_managed_install
+
 absolute_payload_path() {
   local path="$1"
   local directory

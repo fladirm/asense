@@ -5,6 +5,7 @@ use super::{Language, tr};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPOSITORY_URL: &str = "https://github.com/fladirm/asense";
 const RELEASE_URL: &str = "https://github.com/fladirm/asense/releases/latest";
+const PPA_URL: &str = "https://launchpad.net/~fladirmacht/+archive/ubuntu/asense";
 const BITCOIN_ADDRESS: &str = "bc1qqdumr0umlaak7tyrrh0jx729z272fv2jr4t5zp";
 const BITCOIN_URI: &str = "bitcoin:bc1qqdumr0umlaak7tyrrh0jx729z272fv2jr4t5zp";
 const PAYPAL_ACCOUNT: &str = "@fladirm";
@@ -34,16 +35,9 @@ const DONATE_QR_DATA_URI: &str = concat!(
     "X0T9AZqSqyWfhhW5AAAAAElFTkSuQmCC",
 );
 
-const RELEASE_DEPENDENCIES: &str = r#"sudo apt update
-sudo apt install \
-  build-essential dkms "linux-headers-$(uname -r)" kmod udev util-linux \
-  python3 unzip mokutil desktop-file-utils \
-  libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 libssl3t64"#;
-
-const RELEASE_INSTALL: &str = r#"sha256sum --check asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.2.0-ubuntu-26.04-x86_64-installer-*/
-./install.sh"#;
+const RELEASE_INSTALL: &str = r#"sudo add-apt-repository ppa:fladirmacht/asense
+sudo apt update
+sudo apt install asense"#;
 
 const SOURCE_DEPENDENCIES: &str = r#"sudo apt update
 sudo apt install \
@@ -484,21 +478,18 @@ fn UsagePane(active: DocsTab, language: Language) -> Element {
             role: "tabpanel",
             "aria-label": DocsTab::Usage.label(language),
 
-            h3 { {tr(language, "Instalace vydání", "Install a release")} }
+            h3 { {tr(language, "Instalace přes Ubuntu PPA", "Install through the Ubuntu PPA")} }
             p { {tr(
                 language,
-                "Doporučený balík je ubuntu-26.04-x86_64-installer ZIP z posledního GitHub vydání. Obsahuje hotové binárky asense a asensed, takže Rust není potřeba. Ubuntu 26.04 x86_64 je podporovaný baseline předpřipraveného balíku.",
-                "The recommended asset is the ubuntu-26.04-x86_64-installer ZIP from the latest GitHub release. It contains prebuilt asense and asensed binaries, so Rust is not required. Ubuntu 26.04 x86_64 is the supported prebuilt baseline.",
+                "Doporučená instalace je spravovaná přes ASense Ubuntu PPA. APT nainstaluje aplikaci, daemon, DKMS transport a desktopovou integraci společně; Rust není potřeba.",
+                "The recommended installation is managed through the ASense Ubuntu PPA. APT installs the application, daemon, DKMS transport and desktop integration together; Rust is not required.",
             )} }
-            a { class: "docs-primary-link", href: RELEASE_URL, {tr(language, "Otevřít poslední vydání", "Open latest release")} }
-            h4 { {tr(language, "Závislosti", "Dependencies")} }
-            pre { code { "{RELEASE_DEPENDENCIES}" } }
-            h4 { {tr(language, "Ověření a instalace", "Verify and install")} }
-            p { {tr(language, "Instalátor spusťte jako přihlášený desktopový uživatel, ne přes sudo.", "Run the installer as the logged-in desktop user, not through sudo.")} }
+            a { class: "docs-primary-link", href: PPA_URL, {tr(language, "Otevřít PPA", "Open PPA")} }
+            h4 { {tr(language, "Instalace", "Install")} }
             pre { code { "{RELEASE_INSTALL}" } }
 
             h3 { {tr(language, "Spuštění, diagnostika a odstranění", "Run, probe and uninstall")} }
-            pre { code { "asense\nasense probe > asense-probe.json\n/usr/libexec/asense/uninstall.sh" } }
+            pre { code { "asense\nasense probe > asense-probe.json\nsudo apt remove asense\nsudo apt purge asense" } }
             p { {tr(
                 language,
                 "Před spuštěním probe zavřete okno ASense, aby jednorázový dotaz mohl použít jedinou control session daemonu.",

@@ -62,11 +62,11 @@ Release.
 Download that artifact, then verify all checksums:
 
 ```bash
-sha256sum --check asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
-sha256sum --check asense-v0.2.0-source-*.zip.sha256
+sha256sum --check asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip.sha256
+sha256sum --check asense-v0.2.1-source-*.zip.sha256
 sha256sum --check SHA256SUMS
-unzip -t asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip
-unzip -t asense-v0.2.0-source-*.zip
+unzip -t asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip
+unzip -t asense-v0.2.1-source-*.zip
 ```
 
 Install the downloaded installer on the reference PHN16-72 as the logged-in

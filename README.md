@@ -146,7 +146,24 @@ commands; it is not a firmware-enumerated list. The probe makes this distinction
 explicit as `profiles.choices_source = kernel-live` or
 `known-gaming-wmi-commands`.
 
-## Install a release
+## Install
+
+### Ubuntu PPA (recommended)
+
+On Ubuntu 26.04, install ASense and receive updates through APT:
+
+```bash
+sudo add-apt-repository ppa:fladirmacht/asense
+sudo apt update
+sudo apt install asense
+```
+
+APT installs the application, privileged daemon, DKMS transport and desktop
+integration together. Rust is not required. Remove the package with
+`sudo apt remove asense`, or remove its ASense-owned configuration and state as
+well with `sudo apt purge asense`.
+
+### Standalone release
 
 The recommended release asset is the
 [`ubuntu-26.04-x86_64-installer` ZIP](https://github.com/fladirm/asense/releases/latest).
@@ -167,15 +184,22 @@ Download the installer ZIP and matching `.zip.sha256` from the Release page,
 then verify and install it as the logged-in desktop user (not with `sudo`):
 
 ```bash
-sha256sum --check asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.2.0-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.2.0-ubuntu-26.04-x86_64-installer-*/
+sha256sum --check asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip.sha256
+unzip asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip
+cd asense-v0.2.1-ubuntu-26.04-x86_64-installer-*/
 ./install.sh
 ```
 
 The installer requests elevation only for system files, builds the optional
 DKMS transport when needed, configures the daemon/socket and verifies the
 installation. Re-running a newer installer upgrades in place.
+
+Standalone releases can be reinstalled or upgraded in place. A Debian package
+can likewise be reinstalled or upgraded through APT and safely takes ownership
+of an older standalone installation. To avoid mixed ownership, the standalone
+installer and uninstaller refuse to modify an installation currently managed
+by dpkg; remove the Debian package first if you intentionally want to switch
+back to the standalone release.
 
 Launch ASense from the application menu or run:
 

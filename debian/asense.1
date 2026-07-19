@@ -1,0 +1,33 @@
+.TH ASENSE 1 "19 July 2026" "ASense 0.2.1" "User Commands"
+.SH NAME
+asense \- Acer laptop control center
+.SH SYNOPSIS
+.B asense
+.RI [ option ]
+.SH DESCRIPTION
+.B ASense
+is a graphical Linux control center for supported Acer Predator and Nitro
+laptops.  Available controls are discovered independently from Linux
+platform-profile, hwmon, Acer WMI and supported HID interfaces.
+.PP
+Running the command without an option opens or focuses the graphical control
+panel.
+.SH OPTIONS
+.TP
+.B probe, --probe
+Print a local, read-only JSON capability report to standard output.  The
+report omits serial numbers, UUIDs, account names and network identifiers.
+.TP
+.B --toggle
+Open ASense when it is closed, or close the existing ASense window.
+.SH FILES
+.TP
+.I /etc/asense/desktop-user
+Desktop account authorized to use the private ASense control socket.
+.TP
+.I /run/asense-control.sock
+Private socket used to communicate with the privileged ASense daemon.
+.SH SEE ALSO
+.BR asense-configure-user (8)
+.SH BUGS
+Report bugs at https://github.com/fladirm/asense/issues.

@@ -1,0 +1,17 @@
+asense (0.2.1-1~ppa1~resolute1) resolute; urgency=medium
+
+  * Prevent standalone install/uninstall over a dpkg-managed installation.
+  * Keep standalone-to-Debian migration and repeat package upgrades clean.
+  * Write the selected desktop user through a real temporary file so package
+    reinstall works with the Ubuntu 26.04 coreutils-from-uutils install tool.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Sun, 19 Jul 2026 23:05:00 +0200
+
+asense (0.2.0-1~ppa1~resolute1) resolute; urgency=medium
+
+  * Initial Ubuntu PPA package for ASense 0.2.0.
+  * Build the GUI and privileged daemon from the locked vendored Rust sources.
+  * Install the ASense DKMS module, systemd integration, udev rules and
+    AppStream metadata.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Sun, 19 Jul 2026 21:30:00 +0200

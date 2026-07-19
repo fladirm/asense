@@ -1,0 +1,44 @@
+Source: asense
+Section: utils
+Priority: optional
+Maintainer: Fladirmacht <fladirmacht@gmail.com>
+Rules-Requires-Root: no
+Build-Depends:
+ appstream,
+ cargo (>= 1.88),
+ debhelper-compat (= 13),
+ desktop-file-utils,
+ dh-dkms,
+ libgtk-3-dev,
+ libssl-dev,
+ libwebkit2gtk-4.1-dev,
+ libxdo-dev,
+ pkgconf,
+ rustc (>= 1.88)
+Standards-Version: 4.7.2
+Homepage: https://github.com/fladirm/asense
+Vcs-Browser: https://github.com/fladirm/asense
+Vcs-Git: https://github.com/fladirm/asense.git
+
+Package: asense
+Architecture: amd64
+Depends:
+ kmod,
+ libglib2.0-bin,
+ python3,
+ systemd,
+ udev,
+ ${misc:Depends},
+ ${shlibs:Depends}
+Recommends:
+ linux-headers-generic
+Suggests:
+ mokutil
+Description: Linux control center for Acer Predator and Nitro laptops
+ ASense is a native control panel for supported Acer laptops. It provides
+ firmware performance profiles, fan control, live hardware telemetry,
+ keyboard and chassis lighting, and selected battery and platform settings.
+ .
+ Hardware features are detected independently through Linux platform-profile,
+ hwmon, Acer WMI and supported HID interfaces. The package includes a
+ privileged, socket-activated daemon and an ASense DKMS module.

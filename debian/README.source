@@ -1,0 +1,32 @@
+ASense Debian source package
+============================
+
+Launchpad builds have no network access. The package therefore uses the locked
+Cargo dependency graph from Cargo.lock and an additional upstream source
+component named "vendor".
+
+The source upload must contain both:
+
+  asense_0.2.1.orig.tar.xz
+  asense_0.2.1.orig-vendor.tar.xz
+
+After unpacking, the second component must provide vendor/<crate directories.
+debian/cargo-config.toml replaces crates.io with that directory and every Cargo
+command is run with --frozen and CARGO_NET_OFFLINE=true.
+
+A reproducible preparation sequence is:
+
+  git archive --format=tar --prefix=asense-0.2.1/ v0.2.1 \
+    | xz -9e > ../asense_0.2.1.orig.tar.xz
+  cargo vendor --locked --versioned-dirs vendor
+  tar --sort=name --mtime="@$(git show -s --format=%ct v0.2.1)" \
+    --owner=0 --group=0 --numeric-owner -C vendor -c . \
+    | xz -9e > ../asense_0.2.1.orig-vendor.tar.xz
+
+Before upload, verify that the vendor directory is complete with:
+
+  CARGO_HOME="$PWD/debian/cargo-home" cargo metadata --frozen --offline \
+    --format-version 1 >/dev/null
+
+Do not add generated target files or Cargo registry caches to the source
+package. Vendored crates retain their individual upstream licenses.

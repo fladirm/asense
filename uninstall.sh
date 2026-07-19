@@ -5,6 +5,23 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=packaging/common.sh
 source "$ROOT/packaging/common.sh"
 
+refuse_package_managed_uninstall() {
+  local status
+
+  command -v dpkg-query >/dev/null 2>&1 || return 0
+  status="$(dpkg-query -W -f='${Status}' asense 2>/dev/null || true)"
+  case "$status" in
+    "" | "deinstall ok config-files" | "purge ok not-installed" | "unknown ok not-installed")
+      return 0
+      ;;
+    *)
+      asense_die "ASense is managed by APT or dpkg is changing it; use 'sudo apt remove asense' or 'sudo apt purge asense'"
+      ;;
+  esac
+}
+
+refuse_package_managed_uninstall
+
 TARGET_USER="${1:-}"
 DKMS_CONF="$ROOT/kernel/dkms.conf"
 DKMS_NAME="$(asense_dkms_value PACKAGE_NAME "$DKMS_CONF")"

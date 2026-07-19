@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /usr/libexec/asense/packaging/common.sh
+
+usage() {
+  printf 'Usage: asense-shortcut install|remove USER\n' >&2
+  exit 2
+}
+
+action="${1:-}"
+target_user="${2:-}"
+[[ "$action" == "install" || "$action" == "remove" ]] || usage
+[[ -n "$target_user" ]] || usage
+
+asense_init_privilege
+asense_resolve_target_user "$target_user"
+
+case "$action" in
+  install)
+    asense_install_shortcut
+    ;;
+  remove)
+    asense_remove_shortcut
+    ;;
+esac
+
+case "$ASENSE_SHORTCUT_STATUS" in
+  installed | removed | not-owned | unavailable)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac

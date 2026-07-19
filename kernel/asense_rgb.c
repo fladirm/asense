@@ -2210,4 +2210,4 @@ module_wmi_driver(asense_rgb_driver);
 MODULE_AUTHOR("ASense contributors");
 MODULE_DESCRIPTION("Bounded Acer Gaming, Battery and APGE WMI transport");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.2.0");
+MODULE_VERSION("0.2.1");
