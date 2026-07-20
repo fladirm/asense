@@ -330,6 +330,19 @@ pub struct NvidiaLiveTelemetry {
     pub errors: Vec<String>,
 }
 
+impl NvidiaLiveTelemetry {
+    /// A conservative indication that the dGPU has been idle long enough for
+    /// the telemetry owner to consider releasing its NVML session. Missing
+    /// utilization or P-state data is deliberately treated as active: an
+    /// uncertain sample must not make ASense flap the driver lifecycle.
+    pub(crate) fn is_runtime_idle(&self) -> bool {
+        self.utilization_percent == Some(0)
+            && self
+                .pstate
+                .is_some_and(|state| state >= PerformanceState::P8)
+    }
+}
+
 /// Slowly-changing NVML data which callers can cache for the lifetime of the
 /// controller/driver session.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -357,6 +370,9 @@ pub struct NvidiaPciDevice {
     pub bus_id: String,
     pub identity: PciIdentity,
     pub runtime_status: NvidiaRuntimeStatus,
+    /// Standard runtime-PM usage counter. `None` means the kernel does not
+    /// expose it; telemetry must then use its bounded compatibility path.
+    pub runtime_usage: Option<u32>,
 }
 
 impl NvidiaPciDevice {
@@ -776,7 +792,7 @@ pub struct NvidiaController {
     states: Vec<PerformanceState>,
     exact_oem_target: bool,
     /// Only the exact OEM discovery path may mutate VF offsets. The generic
-    /// sample-scoped telemetry path must remain structurally unable to become
+    /// read-only telemetry path must remain structurally unable to become
     /// a tuning controller merely because a driver exposes offset symbols.
     mutation_authorized: bool,
 }
@@ -1604,10 +1620,14 @@ pub fn discover_nvidia_pci_device(root: &Path) -> Option<NvidiaPciDevice> {
             let identity = read_pci_identity_at(root, &bus_id).ok()?;
             let runtime_status =
                 classify_runtime_status(fs::read_to_string(path.join("power/runtime_status")));
+            let runtime_usage = fs::read_to_string(path.join("power/runtime_usage"))
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok());
             Some(NvidiaPciDevice {
                 bus_id,
                 identity,
                 runtime_status,
+                runtime_usage,
             })
         })
         .collect::<Vec<_>>();
@@ -1716,6 +1736,51 @@ mod tests {
             assert!(!nvml(code).invalidates_session(), "code={code}");
         }
         assert!(!NvidiaError::UnavailableCapability { operation: "test" }.invalidates_session());
+    }
+
+    #[test]
+    fn live_sample_only_reports_confident_low_power_idle() {
+        let idle = NvidiaLiveTelemetry {
+            utilization_percent: Some(0),
+            pstate: Some(PerformanceState::P8),
+            ..NvidiaLiveTelemetry::default()
+        };
+        assert!(idle.is_runtime_idle());
+        assert!(
+            NvidiaLiveTelemetry {
+                pstate: Some(PerformanceState::P15),
+                ..idle.clone()
+            }
+            .is_runtime_idle()
+        );
+        assert!(
+            !NvidiaLiveTelemetry {
+                utilization_percent: Some(1),
+                ..idle.clone()
+            }
+            .is_runtime_idle()
+        );
+        assert!(
+            !NvidiaLiveTelemetry {
+                pstate: Some(PerformanceState::P0),
+                ..idle.clone()
+            }
+            .is_runtime_idle()
+        );
+        assert!(
+            !NvidiaLiveTelemetry {
+                utilization_percent: None,
+                ..idle.clone()
+            }
+            .is_runtime_idle()
+        );
+        assert!(
+            !NvidiaLiveTelemetry {
+                pstate: None,
+                ..idle
+            }
+            .is_runtime_idle()
+        );
     }
 
     struct FakeOffsetDevice {
@@ -1939,6 +2004,7 @@ mod tests {
         let device = discover_nvidia_pci_device(&root).expect("NVIDIA display controller");
         assert_eq!(device.bus_id, "0000:07:00.0");
         assert_eq!(device.runtime_status, NvidiaRuntimeStatus::Suspended);
+        assert_eq!(device.runtime_usage, None);
         assert!(device.is_exact_oem_target());
         assert!(matches!(
             NvidiaController::discover_telemetry(&device, &root, false),
@@ -1947,6 +2013,28 @@ mod tests {
                 ..
             })
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_runtime_usage_as_a_passive_external_activity_signal() {
+        let root = pci_fixture_root("runtime-usage");
+        write_pci_fixture(
+            &root,
+            "0000:03:00.0",
+            NVIDIA_VENDOR_ID,
+            0x28a0,
+            0x030200,
+            Some("active"),
+        );
+        fs::write(
+            root.join("sys/bus/pci/devices/0000:03:00.0/power/runtime_usage"),
+            "2\n",
+        )
+        .unwrap();
+
+        let device = discover_nvidia_pci_device(&root).expect("NVIDIA display controller");
+        assert_eq!(device.runtime_usage, Some(2));
         fs::remove_dir_all(root).unwrap();
     }
 

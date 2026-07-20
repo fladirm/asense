@@ -11,11 +11,14 @@ refuse_package_managed_install() {
   command -v dpkg-query >/dev/null 2>&1 || return 0
   status="$(dpkg-query -W -f='${Status}' asense 2>/dev/null || true)"
   case "$status" in
-    "" | "deinstall ok config-files" | "purge ok not-installed" | "unknown ok not-installed")
+    "" | "purge ok not-installed" | "unknown ok not-installed")
       return 0
       ;;
+    "deinstall ok config-files")
+      asense_die "the removed Debian package still owns purge-time ASense state; run 'sudo apt purge asense' before using the standalone installer"
+      ;;
     *)
-      asense_die "ASense is managed by APT or dpkg is changing it; use 'sudo apt update && sudo apt install --only-upgrade asense', or remove the package before using the standalone installer"
+      asense_die "ASense is managed by APT or dpkg is changing it; use 'sudo apt update && sudo apt install --only-upgrade asense', or purge the package before using the standalone installer"
       ;;
   esac
 }
@@ -105,8 +108,9 @@ add_kernel_release() {
   local candidate="$1"
   local existing
 
-  [[ "$candidate" != */* && -d "/lib/modules/$candidate/build" ]] ||
-    asense_die "kernel headers are missing for preserved DKMS target: $candidate"
+  [[ -n "$candidate" && "$candidate" != */* ]] ||
+    asense_die "unsafe kernel release in DKMS state: $candidate"
+  asense_kernel_headers_available "$candidate" || return 1
   for existing in "${KERNEL_RELEASES[@]}"; do
     [[ "$existing" != "$candidate" ]] || return 0
   done
@@ -151,7 +155,15 @@ record_old_dkms_state() {
   add_old_registered_version "$version"
   if [[ -n "$kernel" ]]; then
     validate_dkms_component kernel "$kernel"
-    add_kernel_release "$kernel"
+    if ! add_kernel_release "$kernel"; then
+      if asense_kernel_release_present "$kernel"; then
+        asense_die "kernel $kernel is still installed but its headers are missing; install the matching headers or remove that kernel before upgrading ASense"
+      fi
+      # A DKMS registration can outlive a removed kernel and its headers. It
+      # is safe to discard only that orphaned target during the upgrade.
+      asense_warn "ignoring stale DKMS target $version for removed kernel $kernel"
+      return 0
+    fi
   fi
   OLD_DKMS_RECORD_VERSIONS+=("$version")
   OLD_DKMS_RECORD_KERNELS+=("$kernel")
@@ -168,7 +180,8 @@ collect_old_dkms_state() {
   local source
 
   if ((INSTALL_DKMS)); then
-    add_kernel_release "$KERNEL_RELEASE"
+    add_kernel_release "$KERNEL_RELEASE" ||
+      asense_die "kernel headers are missing for $KERNEL_RELEASE"
   fi
   status_output="$(asense_root dkms status -m "$DKMS_NAME")" ||
     asense_die "cannot inspect existing DKMS state for $DKMS_NAME"

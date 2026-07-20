@@ -146,6 +146,11 @@ commands; it is not a firmware-enumerated list. The probe makes this distinction
 explicit as `profiles.choices_source = kernel-live` or
 `known-gaming-wmi-commands`.
 
+The battery 80% health limit is a firmware setting, not a Linux charge
+threshold file. Enabling it while the battery is already above 80% does not
+actively discharge the battery; the effect becomes visible after normal use,
+when firmware prevents a subsequent charge from exceeding the limit.
+
 ## Install
 
 ### Ubuntu PPA (recommended)
@@ -184,9 +189,9 @@ Download the installer ZIP and matching `.zip.sha256` from the Release page,
 then verify and install it as the logged-in desktop user (not with `sudo`):
 
 ```bash
-sha256sum --check asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.2.1-ubuntu-26.04-x86_64-installer-*/
+sha256sum --check asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip.sha256
+unzip asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip
+cd asense-v0.2.2-ubuntu-26.04-x86_64-installer-*/
 ./install.sh
 ```
 
@@ -198,8 +203,9 @@ Standalone releases can be reinstalled or upgraded in place. A Debian package
 can likewise be reinstalled or upgraded through APT and safely takes ownership
 of an older standalone installation. To avoid mixed ownership, the standalone
 installer and uninstaller refuse to modify an installation currently managed
-by dpkg; remove the Debian package first if you intentionally want to switch
-back to the standalone release.
+by dpkg. Run `sudo apt purge asense` before switching from the Debian package
+back to a standalone release; a plain `apt remove` deliberately leaves package
+state whose later purge could otherwise affect the standalone installation.
 
 Launch ASense from the application menu or run:
 

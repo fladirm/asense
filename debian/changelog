@@ -1,3 +1,24 @@
+asense (0.2.2-1~ppa1~resolute1) resolute; urgency=medium
+
+  * Keep one NVML session for each live dGPU epoch instead of repeatedly
+    initializing and shutting down NVML at the 1 Hz telemetry rate.
+  * Prevent file-descriptor exhaustion on affected NVIDIA drivers while
+    retaining passive runtime-power gating for a suspended hybrid dGPU.
+  * Preserve the last verified controls when Refresh encounters a transient
+    error, and keep the control completion worker alive across stale results.
+  * Bound native resize correction state and the privileged mutation lock so
+    neither can remain stuck indefinitely.
+  * Decode USB-off charging as an enabled flag plus stored threshold, keeping
+    the control available after disabling a previously selected 20% or 30%.
+  * Fix the systemd sleep-hook argument order so post-resume reconciliation
+    actually runs.
+  * Require a full Debian package purge before switching to the standalone
+    installer, preventing delayed package cleanup from affecting it.
+  * Let standalone cleanup finish if its original desktop account was deleted,
+    and ignore stale DKMS targets only after their kernel was removed.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Mon, 20 Jul 2026 05:15:00 +0200
+
 asense (0.2.1-1~ppa1~resolute1) resolute; urgency=medium
 
   * Prevent standalone install/uninstall over a dpkg-managed installation.

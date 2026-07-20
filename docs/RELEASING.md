@@ -62,11 +62,11 @@ Release.
 Download that artifact, then verify all checksums:
 
 ```bash
-sha256sum --check asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip.sha256
-sha256sum --check asense-v0.2.1-source-*.zip.sha256
+sha256sum --check asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip.sha256
+sha256sum --check asense-v0.2.2-source-*.zip.sha256
 sha256sum --check SHA256SUMS
-unzip -t asense-v0.2.1-ubuntu-26.04-x86_64-installer-*.zip
-unzip -t asense-v0.2.1-source-*.zip
+unzip -t asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip
+unzip -t asense-v0.2.2-source-*.zip
 ```
 
 Install the downloaded installer on the reference PHN16-72 as the logged-in
@@ -75,6 +75,14 @@ Battery/APGE, suspend/resume and protocol 2/CAPS. With no external dGPU user,
 leave the GUI open for at least 65 seconds and confirm that
 `power/runtime_status` remains `suspended`; opening ASense must not create an
 NVML session or wake the GPU.
+
+For the v0.2.2 telemetry hotfix, also keep an external NVIDIA workload and the
+ASense GUI active for at least 30 minutes. After warm-up, the GUI process file
+descriptor count in `/proc/<pid>/fd` must remain flat (allowing normal
+short-lived variation of approximately two descriptors), telemetry and Check
+must remain responsive, and no linear `anon_inode:[eventfd]` growth is
+allowed. After the workload exits and no other dGPU user remains, confirm that
+the device can return to `suspended` without restarting ASense.
 
 Only after that exact asset passes, create and push the annotated tag:
 

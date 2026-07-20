@@ -23,6 +23,7 @@ refuse_package_managed_uninstall() {
 refuse_package_managed_uninstall
 
 TARGET_USER="${1:-}"
+TARGET_USER_AVAILABLE=0
 DKMS_CONF="$ROOT/kernel/dkms.conf"
 DKMS_NAME="$(asense_dkms_value PACKAGE_NAME "$DKMS_CONF")"
 DKMS_VERSION="$(asense_dkms_value PACKAGE_VERSION "$DKMS_CONF")"
@@ -80,9 +81,20 @@ if [[ -z "$TARGET_USER" && -f /etc/systemd/system/asense.socket ]]; then
   TARGET_USER="$(sed -n 's/^SocketUser=//p' /etc/systemd/system/asense.socket)"
 fi
 TARGET_USER="${TARGET_USER:-${SUDO_USER:-${USER:-}}}"
-[[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]] ||
-  asense_die "target desktop user is missing; pass it explicitly as the first argument"
-asense_resolve_target_user "$TARGET_USER"
+if asense_try_resolve_target_user "$TARGET_USER"; then
+  TARGET_USER_AVAILABLE=1
+else
+  # The account recorded in SocketUser may have been deleted since install.
+  # System files, services and DKMS state must still be removable.  We cannot
+  # safely guess a vanished account's home/session, so skip only its optional
+  # GNOME shortcut and per-user desktop cleanup.
+  if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
+    asense_warn "desktop account '$TARGET_USER' no longer exists; continuing system uninstall without per-user shortcut cleanup"
+  else
+    asense_warn "no desktop account is available; continuing system uninstall without per-user shortcut cleanup"
+  fi
+  TARGET_USER=""
+fi
 asense_init_privilege
 asense_root true
 collect_dkms_versions
@@ -124,7 +136,8 @@ for version in "${DKMS_VERSIONS[@]}"; do
   asense_root rm -rf -- "/usr/src/$DKMS_NAME-$version"
 done
 
-if [[ -f /etc/udev/hwdb.d/90-asense-predator-key.hwdb ]]; then
+if ((TARGET_USER_AVAILABLE)) &&
+  [[ -f /etc/udev/hwdb.d/90-asense-predator-key.hwdb ]]; then
   if ! asense_remove_shortcut; then
     asense_warn "system files were removed, but the GNOME shortcut could not be cleaned"
   fi
@@ -142,10 +155,13 @@ asense_root rm -f -- \
   /usr/libexec/asense/asensed \
   /usr/share/applications/asense.desktop \
   /usr/share/icons/hicolor/scalable/apps/asense.svg \
-  "$ASENSE_TARGET_HOME/.local/share/applications/asense.desktop" \
   /run/asense-control.sock \
   /run/asense-nvidia-reconcile \
   /run/asense-mutation.lock
+if ((TARGET_USER_AVAILABLE)); then
+  asense_root rm -f -- \
+    "$ASENSE_TARGET_HOME/.local/share/applications/asense.desktop"
+fi
 asense_root rm -rf -- /var/lib/asense
 asense_root systemd-hwdb update
 asense_root udevadm control --reload-rules
@@ -194,4 +210,7 @@ case "$ASENSE_SHORTCUT_STATUS" in
     printf "%s\n" "The selected account's GNOME shortcut cleanup was not confirmed."
     ;;
 esac
+if ((!TARGET_USER_AVAILABLE)); then
+  printf "%s\n" "No existing desktop account was available; any orphaned per-user launcher/shortcut was left untouched."
+fi
 exit "$UNINSTALL_STATUS"

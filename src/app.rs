@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_desktop::tao::dpi::{LogicalSize, PhysicalSize};
-use dioxus_desktop::tao::event::{Event as TaoEvent, WindowEvent};
+use dioxus_desktop::tao::event::{ElementState, Event as TaoEvent, MouseButton, WindowEvent};
 use dioxus_desktop::tao::window::ResizeDirection;
 use dioxus_desktop::{Config, WindowBuilder, use_window, use_wry_event_handler};
 use futures_util::future::poll_fn;
@@ -58,6 +59,7 @@ const MAX_LIGHTING_ZONES: u8 = 16;
 const PROFILE_SYNC_GRACE_SAMPLES: u8 = 12;
 const PROFILE_MISMATCH_DEBOUNCE_SAMPLES: u8 = 2;
 const TELEMETRY_RETRY_MAX_SECONDS: u64 = 8;
+const RESIZE_CORRECTION_TIMEOUT: Duration = Duration::from_millis(350);
 const RESIZE_SCRIPT: &str = r#"
 (() => {
     const viewport = document.querySelector('.window-workspace');
@@ -348,13 +350,29 @@ fn aspect_constrained_size(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingResizeCorrection {
+    target: PhysicalSize<u32>,
+    generation: u64,
+    ignore_intermediate: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeObservation {
+    Ignore,
+    NoSchedule,
+    ScheduleCorrection,
+}
+
 #[derive(Debug)]
 struct AspectResizeState {
     advanced: bool,
     accepted: PhysicalSize<u32>,
-    pending_correction: Option<PhysicalSize<u32>>,
+    pending_correction: Option<PendingResizeCorrection>,
+    correction_generation: u64,
     latest_request: Option<PhysicalSize<u32>>,
     correction_scheduled: bool,
+    finalize_after_pending: bool,
     direction: Option<ResizeDirection>,
 }
 
@@ -364,50 +382,141 @@ impl AspectResizeState {
             advanced: false,
             accepted,
             pending_correction: None,
+            correction_generation: 0,
             latest_request: None,
             correction_scheduled: false,
+            finalize_after_pending: false,
             direction: None,
+        }
+    }
+
+    fn observe_resize(&mut self, requested: PhysicalSize<u32>) -> ResizeObservation {
+        if let Some(pending) = self.pending_correction {
+            if physical_size_close(pending.target, requested) {
+                self.accepted = requested;
+                self.pending_correction = None;
+                self.latest_request = None;
+                self.finalize_after_pending = false;
+                return ResizeObservation::NoSchedule;
+            }
+
+            // Updating compact/advanced constraints can emit an intermediate
+            // GTK resize before the requested mode target. Keep waiting for
+            // that one target; its bounded timeout handles a missing ACK.
+            if pending.ignore_intermediate {
+                return ResizeObservation::Ignore;
+            }
+
+            // A mismatched WM acknowledgement is authoritative. Accept the
+            // actual native size and do not replay the same correction.
+            self.accepted = requested;
+            self.pending_correction = None;
+            self.latest_request = None;
+            if self.finalize_after_pending {
+                self.finalize_after_pending = false;
+                self.latest_request = Some(requested);
+                if !self.correction_scheduled {
+                    self.correction_scheduled = true;
+                    return ResizeObservation::ScheduleCorrection;
+                }
+            }
+            return ResizeObservation::NoSchedule;
+        }
+
+        self.latest_request = Some(requested);
+        if self.correction_scheduled {
+            ResizeObservation::NoSchedule
+        } else {
+            self.correction_scheduled = true;
+            ResizeObservation::ScheduleCorrection
+        }
+    }
+
+    fn begin_pending_correction(
+        &mut self,
+        target: PhysicalSize<u32>,
+        ignore_intermediate: bool,
+    ) -> u64 {
+        self.correction_generation = self.correction_generation.wrapping_add(1);
+        let generation = self.correction_generation;
+        self.pending_correction = Some(PendingResizeCorrection {
+            target,
+            generation,
+            ignore_intermediate,
+        });
+        self.finalize_after_pending = false;
+        generation
+    }
+
+    fn expire_pending_correction(
+        &mut self,
+        generation: u64,
+        actual: PhysicalSize<u32>,
+    ) -> ResizeObservation {
+        if self
+            .pending_correction
+            .is_none_or(|pending| pending.generation != generation)
+        {
+            return ResizeObservation::Ignore;
+        }
+        self.pending_correction = None;
+        self.latest_request = None;
+        self.accepted = actual;
+        if self.finalize_after_pending {
+            self.finalize_after_pending = false;
+            self.latest_request = Some(actual);
+            if !self.correction_scheduled {
+                self.correction_scheduled = true;
+                return ResizeObservation::ScheduleCorrection;
+            }
+        }
+        ResizeObservation::NoSchedule
+    }
+
+    /// End a native drag exactly once. An in-flight correction is already the
+    /// final snap; otherwise the queued correction consumes the last real size.
+    fn finish_drag(&mut self, actual: PhysicalSize<u32>) -> bool {
+        if self.direction.take().is_none() {
+            return false;
+        }
+        if self.pending_correction.is_some() {
+            self.latest_request = None;
+            self.finalize_after_pending = true;
+            return false;
+        }
+        self.finalize_after_pending = false;
+        self.latest_request = Some(actual);
+        if self.correction_scheduled {
+            false
+        } else {
+            self.correction_scheduled = true;
+            true
         }
     }
 }
 
-fn queue_aspect_resize(
+fn schedule_pending_correction_timeout(
     window: &dioxus_desktop::DesktopContext,
     state: &Rc<RefCell<AspectResizeState>>,
-    requested: PhysicalSize<u32>,
+    generation: u64,
 ) {
-    let mut resize = state.borrow_mut();
-    let acknowledged = resize
-        .pending_correction
-        .is_some_and(|pending| physical_size_close(pending, requested));
-    if acknowledged {
-        resize.accepted = requested;
-        resize.pending_correction = None;
-        if resize.latest_request.is_none() {
-            return;
+    let window = window.clone();
+    let state = state.clone();
+    glib::timeout_add_local_once(RESIZE_CORRECTION_TIMEOUT, move || {
+        let actual = window.inner_size();
+        let observation = state
+            .borrow_mut()
+            .expire_pending_correction(generation, actual);
+        if observation == ResizeObservation::ScheduleCorrection {
+            schedule_aspect_correction(&window, &state);
         }
-    } else {
-        // Updating compact/advanced constraints can emit an intermediate GTK
-        // resize before the requested target arrives. It is not a pointer
-        // request and must not be replayed after the target is acknowledged.
-        if resize.pending_correction.is_some() && resize.direction.is_none() {
-            return;
-        }
-        resize.latest_request = Some(requested);
-        // Keep exactly one native correction in flight. Pointer-driven sizes
-        // arriving meanwhile replace latest_request and are handled as soon
-        // as the current correction is acknowledged.
-        if resize.pending_correction.is_some() {
-            return;
-        }
-    }
+    });
+}
 
-    if resize.correction_scheduled {
-        return;
-    }
-    resize.correction_scheduled = true;
-    drop(resize);
-
+fn schedule_aspect_correction(
+    window: &dioxus_desktop::DesktopContext,
+    state: &Rc<RefCell<AspectResizeState>>,
+) {
     let window = window.clone();
     let state = state.clone();
     glib::idle_add_local_once(move || {
@@ -435,12 +544,34 @@ fn queue_aspect_resize(
         if physical_size_close(target, requested) {
             resize.accepted = target;
             resize.pending_correction = None;
+            resize.finalize_after_pending = false;
             return;
         }
-        resize.pending_correction = Some(target);
+        let generation = resize.begin_pending_correction(target, false);
         drop(resize);
+        schedule_pending_correction_timeout(&window, &state, generation);
         window.set_inner_size(target);
     });
+}
+
+fn queue_aspect_resize(
+    window: &dioxus_desktop::DesktopContext,
+    state: &Rc<RefCell<AspectResizeState>>,
+    requested: PhysicalSize<u32>,
+) {
+    if state.borrow_mut().observe_resize(requested) != ResizeObservation::ScheduleCorrection {
+        return;
+    }
+    schedule_aspect_correction(window, state);
+}
+
+fn finish_aspect_resize(
+    window: &dioxus_desktop::DesktopContext,
+    state: &Rc<RefCell<AspectResizeState>>,
+) {
+    if state.borrow_mut().finish_drag(window.inner_size()) {
+        schedule_aspect_correction(window, state);
+    }
 }
 
 fn set_window_mode(
@@ -454,15 +585,17 @@ fn set_window_mode(
         (f64::from(current.height) / scale_factor).clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
     let logical_target = logical_window_size(advanced, logical_height);
     let physical_target = logical_target.to_physical::<u32>(scale_factor);
-    {
+    let generation = {
         let mut resize = state.borrow_mut();
         resize.advanced = advanced;
-        resize.pending_correction = Some(physical_target);
         resize.latest_request = None;
+        resize.finalize_after_pending = false;
         resize.direction = None;
-    }
+        resize.begin_pending_correction(physical_target, true)
+    };
     window.set_min_inner_size(Some(logical_window_size(advanced, MIN_WINDOW_HEIGHT)));
     window.set_max_inner_size(Some(logical_window_size(advanced, MAX_WINDOW_HEIGHT)));
+    schedule_pending_correction_timeout(window, state, generation);
     window.set_inner_size(logical_target);
 }
 
@@ -681,7 +814,7 @@ struct ControlUpdate {
 }
 
 struct ControlResultSlotInner {
-    pending: Mutex<Option<ControlUpdate>>,
+    pending: Mutex<VecDeque<ControlUpdate>>,
     waker: AtomicWaker,
 }
 
@@ -694,7 +827,7 @@ impl Default for ControlResultSlot {
     fn default() -> Self {
         Self {
             inner: Arc::new(ControlResultSlotInner {
-                pending: Mutex::new(None),
+                pending: Mutex::new(VecDeque::new()),
                 waker: AtomicWaker::new(),
             }),
         }
@@ -702,24 +835,24 @@ impl Default for ControlResultSlot {
 }
 
 impl ControlResultSlot {
-    fn publish(&self, update: ControlUpdate) -> bool {
+    /// Control completions are events and must never be coalesced or dropped.
+    /// Request submission is single-flight and the command channel is bounded,
+    /// so this queue remains naturally bounded while still surviving a delayed
+    /// UI consumer without terminating the worker.
+    fn publish(&self, update: ControlUpdate) {
         let mut pending = match self.inner.pending.lock() {
             Ok(pending) => pending,
-            Err(_) => return false,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        if pending.is_some() {
-            return false;
-        }
-        *pending = Some(update);
+        pending.push_back(update);
         drop(pending);
         self.inner.waker.wake();
-        true
     }
 
     fn try_take(&self) -> Option<ControlUpdate> {
         match self.inner.pending.try_lock() {
-            Ok(mut pending) => pending.take(),
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().take(),
+            Ok(mut pending) => pending.pop_front(),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().pop_front(),
             Err(TryLockError::WouldBlock) => None,
         }
     }
@@ -753,10 +886,7 @@ impl ControlWorker {
                 let mut control = None;
                 while let Ok(request) = receiver.recv() {
                     let result = execute_control_action(&mut control, request.action.clone());
-                    if !results.publish(ControlUpdate { request, result }) {
-                        eprintln!("asense: control result slot was unexpectedly full");
-                        break;
-                    }
+                    results.publish(ControlUpdate { request, result });
                 }
             });
         match spawn {
@@ -795,6 +925,25 @@ fn Root() -> Element {
             ..
         } if *window_id == resize_window.id() => {
             queue_aspect_resize(&resize_window, &resize_state, *size);
+        }
+        TaoEvent::WindowEvent {
+            window_id,
+            event:
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                },
+            ..
+        } if *window_id == resize_window.id() => {
+            finish_aspect_resize(&resize_window, &resize_state);
+        }
+        TaoEvent::WindowEvent {
+            window_id,
+            event: WindowEvent::Focused(false),
+            ..
+        } if *window_id == resize_window.id() => {
+            finish_aspect_resize(&resize_window, &resize_state);
         }
         TaoEvent::Resumed => resume_signal.store(true, Ordering::Release),
         _ => {}
@@ -874,7 +1023,7 @@ fn Root() -> Element {
     use_hook(move || {
         let request = ControlRequest::background(ControlAction::Initialize);
         if let Err(error) = initial_worker.submit(request.clone()) {
-            let _ = initial_results.publish(ControlUpdate {
+            initial_results.publish(ControlUpdate {
                 request,
                 result: Err(error),
             });
@@ -1348,11 +1497,12 @@ fn fail_control_request(view: &mut AppState, request: ControlRequest, error: Str
         view.platform_busy = false;
         view.platform_error = Some(error.clone());
     }
-    if request.foreground {
-        view.health = HealthState::Warning;
-        view.status_message = error;
-    } else if request.action == ControlAction::Initialize {
+    let initial_connection_failed =
+        request.action == ControlAction::Initialize && view.capabilities.is_none();
+    if initial_connection_failed {
         view.controls_enabled = false;
+    }
+    if request.foreground || initial_connection_failed {
         view.health = HealthState::Warning;
         view.status_message = error;
     }
@@ -1373,10 +1523,7 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
             if update.request.action.touches_platform() {
                 view.platform_error = Some(error.clone());
             }
-            if matches!(
-                &update.request.action,
-                ControlAction::Initialize | ControlAction::Refresh
-            ) {
+            if update.request.action == ControlAction::Initialize && view.capabilities.is_none() {
                 view.controls_enabled = false;
             }
             if update.request.foreground || update.request.action == ControlAction::Initialize {
@@ -1540,7 +1687,10 @@ fn apply_capability_snapshot(
             view.lighting_error = None;
         }
         Err(error) => {
-            view.lighting.available = false;
+            // A transient getter failure does not revoke the endpoint that
+            // the fresh capability snapshot still advertises. Keep the last
+            // verified readback (or the unavailable default during initial
+            // discovery) and surface the read error separately.
             view.lighting_error = Some(error.clone());
             diagnostics.push(format!("RGB: {error}"));
         }
@@ -4711,23 +4861,25 @@ fn clock_event_label(reasons: Option<u64>, language: Language) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ADVANCED_DESIGN_WIDTH, APP_CSS_SOURCE, AppState, COMPACT_DESIGN_WIDTH, ControlAction,
-        ControlOutcome, ControlRequest, ControlResultSlot, ControlUpdate, FanMode, HardwareProfile,
-        HealthState, KeyboardLightingState, Language, LightingApplyRequest, MAX_LIGHTING_ZONES,
-        MIN_WINDOW_HEIGHT, PROFILE_SYNC_GRACE_SAMPLES, PlatformAction, PlatformProfile,
-        RuntimeState, TELEMETRY_HISTORY_CAPACITY, TITLEBAR_DESIGN_HEIGHT, TelemetryHistory,
-        TelemetryPoint, TelemetrySlot, TelemetryUpdate, WORKSPACE_DESIGN_HEIGHT,
-        apply_control_update, apply_telemetry, aspect_constrained_size, begin_control_request,
-        compact_status, gpu_offset_detail, graph_points, keyboard_editor_readback,
-        lighting_apply_status, lighting_draft_for_device, lighting_mode_visibility,
-        lighting_zone_draft, localized_status, logical_window_size, merge_privileged_memory,
-        parse_color_value, parse_lighting_state, physical_size_close, power_usage_limit,
-        preferred_lighting_index, rear_logo_state, reconcile_profile_telemetry,
-        setting_toggle_text, telemetry_retry_delay, workspace_aspect_ratio,
+        ADVANCED_DESIGN_WIDTH, APP_CSS_SOURCE, AppState, AspectResizeState, COMPACT_DESIGN_WIDTH,
+        ControlAction, ControlOutcome, ControlRequest, ControlResultSlot, ControlUpdate, FanMode,
+        HardwareProfile, HealthState, KeyboardLightingState, Language, LightingApplyRequest,
+        MAX_LIGHTING_ZONES, MIN_WINDOW_HEIGHT, PROFILE_SYNC_GRACE_SAMPLES, PlatformAction,
+        PlatformProfile, ResizeObservation, RuntimeState, TELEMETRY_HISTORY_CAPACITY,
+        TITLEBAR_DESIGN_HEIGHT, TelemetryHistory, TelemetryPoint, TelemetrySlot, TelemetryUpdate,
+        WORKSPACE_DESIGN_HEIGHT, apply_capability_snapshot, apply_control_update, apply_telemetry,
+        aspect_constrained_size, begin_control_request, compact_status, empty_platform_state,
+        gpu_offset_detail, graph_points, keyboard_editor_readback, lighting_apply_status,
+        lighting_draft_for_device, lighting_mode_visibility, lighting_zone_draft, localized_status,
+        logical_window_size, merge_privileged_memory, parse_color_value, parse_lighting_state,
+        physical_size_close, power_usage_limit, preferred_lighting_index, rear_logo_state,
+        reconcile_profile_telemetry, setting_toggle_text, telemetry_retry_delay,
+        workspace_aspect_ratio,
     };
     use crate::control::{
-        CapabilityLightingBackend, CapabilityLightingTarget, ControlLightingDevice,
-        ControlLightingMode, ControlLightingModes, ProfileApplyReceipt,
+        CapabilityLightingBackend, CapabilityLightingTarget, ControlCapabilities,
+        ControlFanCapabilities, ControlLightingDevice, ControlLightingMode, ControlLightingModes,
+        ControlPlatformCapabilities, ControlProfileCapabilities, ProfileApplyReceipt,
     };
     use crate::hardware::{FanChannelState, FanMode as HardwareFanMode, FanRpmChannel, FanState};
     use crate::telemetry::{
@@ -5271,19 +5423,147 @@ mod tests {
     }
 
     #[test]
-    fn control_result_slot_holds_at_most_one_completion() {
-        let slot = ControlResultSlot::default();
-        let request = ControlRequest::foreground(ControlAction::FanMode(FanMode::Auto));
-        assert!(slot.publish(ControlUpdate {
-            request: request.clone(),
-            result: Ok(ControlOutcome::FanMode(FanMode::Auto)),
-        }));
+    fn failed_refresh_preserves_existing_capabilities_and_controls() {
+        let capabilities = ControlCapabilities {
+            vendor: "Acer".to_string(),
+            product: "Predator PHN16-72".to_string(),
+            reference_model: true,
+            profiles: ControlProfileCapabilities {
+                backend: None,
+                choices: Vec::new(),
+                current: Some("balanced".to_string()),
+            },
+            fans: ControlFanCapabilities {
+                backend: None,
+                rpm_channels: Vec::new(),
+                auto: false,
+                manual: false,
+                maximum: false,
+            },
+            lighting: Vec::new(),
+            platform: ControlPlatformCapabilities::default(),
+        };
+        let mut state = AppState {
+            capabilities: Some(capabilities.clone()),
+            controls_enabled: true,
+            ..AppState::default()
+        };
+        let request = ControlRequest::foreground(ControlAction::Refresh);
 
-        assert!(!slot.publish(ControlUpdate {
-            request: request.clone(),
-            result: Err("second completion".to_string()),
-        }));
-        assert_eq!(slot.try_take().unwrap().request, request);
+        assert!(begin_control_request(&mut state, request.clone()));
+        apply_control_update(
+            &mut state,
+            ControlUpdate {
+                request,
+                result: Err("refresh failed".to_string()),
+            },
+        );
+
+        assert!(!state.control_busy);
+        assert!(!state.platform_busy);
+        assert!(state.controls_enabled);
+        assert_eq!(state.capabilities, Some(capabilities));
+        assert_eq!(state.platform_error.as_deref(), Some("refresh failed"));
+        assert_eq!(state.status_message, "refresh failed");
+    }
+
+    #[test]
+    fn partial_refresh_preserves_verified_lighting_after_a_readback_error() {
+        let verified = KeyboardLightingState {
+            available: true,
+            powered: true,
+            brightness: 63,
+            zones: [0x12_3456, 0xab_cdef, 0x00_1020, 0xfe_dcba],
+            ..KeyboardLightingState::default()
+        };
+        let capabilities = ControlCapabilities {
+            vendor: "Acer".to_string(),
+            product: "Predator PHN16-72".to_string(),
+            reference_model: true,
+            profiles: ControlProfileCapabilities {
+                backend: None,
+                choices: Vec::new(),
+                current: Some("balanced".to_string()),
+            },
+            fans: ControlFanCapabilities {
+                backend: None,
+                rpm_channels: Vec::new(),
+                auto: false,
+                manual: false,
+                maximum: false,
+            },
+            lighting: vec![ControlLightingDevice {
+                id: "wmi-keyboard".to_string(),
+                backend: CapabilityLightingBackend::ZonedWmi,
+                target: CapabilityLightingTarget::Keyboard,
+                zones: 4,
+                modes: ControlLightingModes {
+                    static_color: true,
+                    brightness: true,
+                    breathing: true,
+                    neon: true,
+                },
+                state_readable: true,
+            }],
+            platform: ControlPlatformCapabilities::default(),
+        };
+        let mut state = AppState {
+            lighting: verified.clone(),
+            capabilities: Some(capabilities.clone()),
+            ..AppState::default()
+        };
+
+        let (_, diagnostics) = apply_capability_snapshot(
+            &mut state,
+            capabilities,
+            Err("temporary RGB readback failure".to_string()),
+            Ok(empty_platform_state()),
+        );
+
+        assert_eq!(state.lighting, verified);
+        assert_eq!(
+            state.lighting_error.as_deref(),
+            Some("temporary RGB readback failure")
+        );
+        assert_eq!(
+            diagnostics,
+            vec!["RGB: temporary RGB readback failure".to_string()]
+        );
+    }
+
+    #[test]
+    fn failed_initialize_disables_controls_only_without_a_snapshot() {
+        let mut state = RuntimeState::boot().view;
+        apply_control_update(
+            &mut state,
+            ControlUpdate {
+                request: ControlRequest::background(ControlAction::Initialize),
+                result: Err("initialization failed".to_string()),
+            },
+        );
+
+        assert!(!state.control_busy);
+        assert!(!state.controls_enabled);
+        assert_eq!(state.health, HealthState::Warning);
+        assert_eq!(state.status_message, "initialization failed");
+    }
+
+    #[test]
+    fn control_result_slot_preserves_delayed_completions_in_order() {
+        let slot = ControlResultSlot::default();
+        let first = ControlRequest::foreground(ControlAction::FanMode(FanMode::Auto));
+        let second = ControlRequest::foreground(ControlAction::FanMode(FanMode::Maximum));
+        slot.publish(ControlUpdate {
+            request: first.clone(),
+            result: Ok(ControlOutcome::FanMode(FanMode::Auto)),
+        });
+        slot.publish(ControlUpdate {
+            request: second.clone(),
+            result: Ok(ControlOutcome::FanMode(FanMode::Maximum)),
+        });
+
+        assert_eq!(slot.try_take().unwrap().request, first);
+        assert_eq!(slot.try_take().unwrap().request, second);
         assert!(slot.try_take().is_none());
     }
 
@@ -5523,6 +5803,152 @@ mod tests {
                 assert!(physical_size_close(projected, repeated));
             }
         }
+    }
+
+    #[test]
+    fn resize_release_and_focus_loss_schedule_at_most_one_final_snap() {
+        let accepted = PhysicalSize::new(620, 830);
+        let actual = PhysicalSize::new(701, 851);
+        let mut resize = AspectResizeState::new(accepted);
+        resize.direction = Some(ResizeDirection::East);
+
+        assert!(resize.finish_drag(actual));
+        assert_eq!(resize.direction, None);
+        assert_eq!(resize.latest_request, Some(actual));
+        assert!(resize.correction_scheduled);
+
+        // Focus loss after the left-button release must not schedule a second
+        // snap for the same native drag.
+        assert!(!resize.finish_drag(actual));
+        assert_eq!(resize.latest_request, Some(actual));
+
+        // If a correction was already sent before release, that correction is
+        // the one final snap and release only ends the drag.
+        let mut in_flight = AspectResizeState::new(accepted);
+        in_flight.direction = Some(ResizeDirection::SouthEast);
+        let generation = in_flight.begin_pending_correction(actual, false);
+        assert!(!in_flight.finish_drag(PhysicalSize::new(700, 850)));
+        assert_eq!(in_flight.direction, None);
+        assert_eq!(
+            in_flight
+                .pending_correction
+                .map(|pending| pending.generation),
+            Some(generation)
+        );
+        assert!(in_flight.latest_request.is_none());
+    }
+
+    #[test]
+    fn mismatched_or_timed_out_resize_ack_accepts_actual_size_without_replay() {
+        let accepted = PhysicalSize::new(620, 830);
+        let target = PhysicalSize::new(700, 900);
+        let mismatch = PhysicalSize::new(696, 896);
+        let mut resize = AspectResizeState::new(accepted);
+        let generation = resize.begin_pending_correction(target, false);
+
+        assert_eq!(
+            resize.observe_resize(mismatch),
+            ResizeObservation::NoSchedule
+        );
+        assert_eq!(resize.accepted, mismatch);
+        assert!(resize.pending_correction.is_none());
+        assert!(resize.latest_request.is_none());
+        assert_eq!(
+            resize.expire_pending_correction(generation, target),
+            ResizeObservation::Ignore
+        );
+
+        let next_target = PhysicalSize::new(710, 910);
+        let next_actual = PhysicalSize::new(708, 908);
+        let next_generation = resize.begin_pending_correction(next_target, false);
+        assert_eq!(
+            resize.expire_pending_correction(next_generation.wrapping_add(1), next_actual),
+            ResizeObservation::Ignore
+        );
+        assert!(resize.pending_correction.is_some());
+        assert_eq!(
+            resize.expire_pending_correction(next_generation, next_actual),
+            ResizeObservation::NoSchedule
+        );
+        assert_eq!(resize.accepted, next_actual);
+        assert!(resize.pending_correction.is_none());
+        assert!(resize.latest_request.is_none());
+    }
+
+    #[test]
+    fn mode_switch_ignores_intermediate_resize_until_target_or_timeout() {
+        let accepted = PhysicalSize::new(620, 830);
+        let intermediate = PhysicalSize::new(900, 830);
+        let target = PhysicalSize::new(1_200, 830);
+        let mut resize = AspectResizeState::new(accepted);
+        let generation = resize.begin_pending_correction(target, true);
+
+        assert_eq!(
+            resize.observe_resize(intermediate),
+            ResizeObservation::Ignore
+        );
+        assert_eq!(resize.accepted, accepted);
+        assert_eq!(
+            resize.pending_correction.map(|pending| pending.generation),
+            Some(generation)
+        );
+
+        assert_eq!(resize.observe_resize(target), ResizeObservation::NoSchedule);
+        assert_eq!(resize.accepted, target);
+        assert!(resize.pending_correction.is_none());
+        assert_eq!(
+            resize.expire_pending_correction(generation, intermediate),
+            ResizeObservation::Ignore
+        );
+    }
+
+    #[test]
+    fn drag_release_during_pending_correction_gets_one_final_snap_after_bad_ack() {
+        let accepted = PhysicalSize::new(620, 830);
+        let target = PhysicalSize::new(700, 900);
+        let clamped = PhysicalSize::new(696, 896);
+        let mut resize = AspectResizeState::new(accepted);
+        resize.direction = Some(ResizeDirection::East);
+        resize.begin_pending_correction(target, false);
+
+        assert!(!resize.finish_drag(clamped));
+        assert!(resize.finalize_after_pending);
+        assert_eq!(
+            resize.observe_resize(clamped),
+            ResizeObservation::ScheduleCorrection
+        );
+        assert_eq!(resize.direction, None);
+        assert_eq!(resize.latest_request, Some(clamped));
+        assert!(resize.correction_scheduled);
+
+        // The one final snap is not itself re-finalized if the WM clamps it.
+        resize.correction_scheduled = false;
+        resize.latest_request = None;
+        resize.begin_pending_correction(target, false);
+        assert_eq!(
+            resize.observe_resize(clamped),
+            ResizeObservation::NoSchedule
+        );
+        assert!(!resize.finalize_after_pending);
+        assert!(resize.latest_request.is_none());
+    }
+
+    #[test]
+    fn drag_release_during_pending_correction_gets_one_final_snap_after_timeout() {
+        let accepted = PhysicalSize::new(620, 830);
+        let target = PhysicalSize::new(700, 900);
+        let actual = PhysicalSize::new(696, 896);
+        let mut resize = AspectResizeState::new(accepted);
+        resize.direction = Some(ResizeDirection::SouthEast);
+        let generation = resize.begin_pending_correction(target, false);
+
+        assert!(!resize.finish_drag(actual));
+        assert_eq!(
+            resize.expire_pending_correction(generation, actual),
+            ResizeObservation::ScheduleCorrection
+        );
+        assert_eq!(resize.latest_request, Some(actual));
+        assert!(resize.correction_scheduled);
     }
 
     #[test]

@@ -45,6 +45,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.2.2" date="2026-07-20">
+      <url>https://github.com/fladirm/asense/releases/tag/v0.2.2</url>
+      <description>
+        <p>
+          Stabilizes long-running NVIDIA telemetry, preserves verified
+          controls across transient refresh errors, fixes USB-off charging
+          state decoding and post-resume reconciliation, and bounds control,
+          resize and mutation-lock recovery paths.
+        </p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-07-19">
       <url>https://github.com/fladirm/asense/releases/tag/v0.2.1</url>
     </release>

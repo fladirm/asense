@@ -80,8 +80,36 @@ asense_resolve_target_user() {
   [[ "$ASENSE_TARGET_HOME" == /* ]] || asense_die "target user has no absolute home: $1"
 
   ASENSE_TARGET_USER="$1"
+  # shellcheck disable=SC2034 # consumed by the sourcing installer scripts
   ASENSE_TARGET_GROUP="$(id -gn "$1")" || asense_die "cannot resolve primary group for: $1"
   ASENSE_TARGET_RUNTIME="/run/user/$ASENSE_TARGET_UID"
+}
+
+# Resolve an optional desktop owner without making system cleanup depend on
+# that account still existing.  This is used by the standalone uninstaller:
+# deleting a desktop account must not strand root-owned services or DKMS state.
+asense_try_resolve_target_user() {
+  local candidate="$1"
+
+  [[ -n "$candidate" && "$candidate" != "root" ]] || return 1
+  getent passwd "$candidate" >/dev/null 2>&1 || return 1
+  asense_resolve_target_user "$candidate"
+}
+
+asense_kernel_headers_available() {
+  local release="$1"
+  local modules_root="${2:-/lib/modules}"
+
+  [[ -n "$release" && "$release" != */* ]] || return 1
+  [[ -d "$modules_root/$release/build" ]]
+}
+
+asense_kernel_release_present() {
+  local release="$1"
+  local modules_root="${2:-/lib/modules}"
+
+  [[ -n "$release" && "$release" != */* ]] || return 1
+  [[ -d "$modules_root/$release" ]]
 }
 
 asense_as_target() {
@@ -171,6 +199,7 @@ asense_remove_shortcut() {
   ASENSE_SHORTCUT_STATUS="failed"
   asense_shortcut_list remove || return 1
   asense_as_target gsettings reset-recursively "$binding" || return 1
+  # shellcheck disable=SC2034 # consumed by the sourcing uninstaller script
   ASENSE_SHORTCUT_STATUS="removed"
 }
 

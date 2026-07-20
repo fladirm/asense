@@ -105,6 +105,22 @@ fn multi_instance_wmi_binding_is_enabled_when_the_kernel_abi_supports_it() {
 }
 
 #[test]
+fn all_endpoints_share_one_synchronous_firmware_mailbox() {
+    let evaluator = body("asense_evaluate_method", "asense_wmi_call");
+    assert!(evaluator.contains("mutex_lock(&asense_wmi_transaction_lock)"));
+    assert!(evaluator.contains("wmidev_evaluate_method(rgb->wdev, 0, method, input, output)"));
+    assert!(evaluator.contains("mutex_unlock(&asense_wmi_transaction_lock)"));
+    assert_eq!(DRIVER.matches("wmidev_evaluate_method(").count(), 1);
+
+    let driver = compact(function_between(
+        "static struct wmi_driver asense_rgb_driver",
+        "module_wmi_driver(asense_rgb_driver)",
+    ));
+    assert!(driver.contains(".probe_type = PROBE_FORCE_SYNCHRONOUS"));
+    assert!(!driver.contains("PROBE_PREFER_ASYNCHRONOUS"));
+}
+
+#[test]
 fn known_endpoints_probe_and_register_independently() {
     let probe = body("asense_rgb_probe", "asense_gaming_endpoint");
     for dispatch in [
@@ -130,9 +146,24 @@ fn known_endpoints_probe_and_register_independently() {
     assert!(battery.contains("&asense_battery_group"));
 
     let apge = body("asense_probe_apge", "asense_rgb_probe");
-    assert!(apge.contains("asense_read_usb(rgb, &threshold)"));
+    assert!(apge.contains("asense_read_usb(rgb, &usb)"));
     assert!(apge.contains("asense_read_timeout(rgb, &enabled)"));
     assert!(apge.contains("&asense_apge_group"));
+}
+
+#[test]
+fn usb_store_never_uses_state_after_a_failed_getter() {
+    let store = body("usb_charging_store", "asense_bool_show");
+    let read = store
+        .find("error = asense_read_usb(rgb, &previous)")
+        .expect("USB store must snapshot firmware state");
+    let early_return = store[read..]
+        .find("if (error) { mutex_unlock(&rgb->lock); return error; }")
+        .expect("failed USB snapshot must return before using it");
+    let copy = store[read..]
+        .find("requested = previous")
+        .expect("USB store must copy a valid snapshot");
+    assert!(early_return < copy);
 }
 
 #[test]
@@ -283,6 +314,20 @@ fn verified_optional_controls_decode_phn16_72_v118_responses() {
     }
     assert!(!battery.contains("result[1] != 0"));
     assert!(!battery.contains("result[2] != 0"));
+
+    let usb = body("asense_read_usb", "asense_write_usb");
+    for required in [
+        "FIELD_GET(ASENSE_USB_STATUS_MASK, result)",
+        "mode != ASENSE_USB_MODE_ENABLED && mode != ASENSE_USB_MODE_DISABLED",
+        "state->threshold = FIELD_GET(ASENSE_USB_THRESHOLD_MASK, result)",
+        "state->enabled = mode == ASENSE_USB_MODE_ENABLED",
+    ] {
+        assert!(usb.contains(required), "missing USB decoder: {required}");
+    }
+    let usb_store = body("usb_charging_store", "asense_bool_show");
+    assert!(usb_store.contains("requested = previous"));
+    assert!(usb_store.contains("requested.enabled = false"));
+    assert!(!usb_store.contains("ASENSE_USB_OFF"));
 
     let timeout = body("asense_read_timeout", "asense_write_timeout");
     assert!(timeout.contains("result == ASENSE_TIMEOUT_UNINITIALIZED"));

@@ -86,11 +86,12 @@
 #define ASENSE_ZONE_FLAG_PREAMBLE BIT(0)
 
 #define ASENSE_USB_GET 0x4ULL
-#define ASENSE_USB_OFF 0x0a1f00ULL
-#define ASENSE_USB_10 0x0a0f00ULL
-#define ASENSE_USB_20 0x140f00ULL
-#define ASENSE_USB_30 0x1e0f00ULL
 #define ASENSE_USB_SET_COMMAND 0x4ULL
+#define ASENSE_USB_STATUS_MASK GENMASK_ULL(7, 0)
+#define ASENSE_USB_MODE_MASK GENMASK_ULL(15, 8)
+#define ASENSE_USB_THRESHOLD_MASK GENMASK_ULL(23, 16)
+#define ASENSE_USB_MODE_ENABLED 0x0f
+#define ASENSE_USB_MODE_DISABLED 0x1f
 
 #define ASENSE_TIMEOUT_GET 0x88401ULL
 #define ASENSE_TIMEOUT_UNINITIALIZED 0x0ULL
@@ -176,6 +177,11 @@ struct asense_battery_state {
 	bool calibration;
 };
 
+struct asense_usb_state {
+	bool enabled;
+	u8 threshold;
+};
+
 struct asense_logo {
 	u8 red;
 	u8 green;
@@ -188,6 +194,26 @@ struct asense_profile_choice {
 	u8 value;
 	const char *name;
 };
+
+/*
+ * All three Acer WMI endpoints ultimately share one firmware mailbox.  The
+ * AML dispatcher is not serialized, so per-device locks are insufficient:
+ * parallel Gaming/Battery/APGE calls can overwrite the shared command state.
+ */
+static DEFINE_MUTEX(asense_wmi_transaction_lock);
+
+static acpi_status asense_evaluate_method(struct asense_rgb *rgb, u32 method,
+
+					  const struct acpi_buffer *input,
+					  struct acpi_buffer *output)
+{
+	acpi_status status;
+
+	mutex_lock(&asense_wmi_transaction_lock);
+	status = wmidev_evaluate_method(rgb->wdev, 0, method, input, output);
+	mutex_unlock(&asense_wmi_transaction_lock);
+	return status;
+}
 
 static const struct asense_profile_choice asense_profile_choices[] = {
 	{ ASENSE_PROFILE_LOW_POWER, "low-power" },
@@ -229,7 +255,7 @@ static int asense_wmi_call(struct asense_rgb *rgb, u32 method,
 	acpi_status status;
 	int error = 0;
 
-	status = wmidev_evaluate_method(rgb->wdev, 0, method, &input, &output);
+	status = asense_evaluate_method(rgb, method, &input, &output);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
@@ -273,7 +299,7 @@ static int asense_endpoint_wmi_call(struct asense_rgb *rgb, u32 method,
 	acpi_status status;
 	int error = 0;
 
-	status = wmidev_evaluate_method(rgb->wdev, 0, method, &input, &output);
+	status = asense_evaluate_method(rgb, method, &input, &output);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
@@ -309,7 +335,7 @@ static int asense_scalar_call(struct asense_rgb *rgb, u32 method,
 	u64 value = 0;
 	int error = 0;
 
-	status = wmidev_evaluate_method(rgb->wdev, 0, method, &input, &output);
+	status = asense_evaluate_method(rgb, method, &input, &output);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
@@ -364,7 +390,7 @@ static int asense_gaming_call(struct asense_rgb *rgb, u32 method,
 	u64 value;
 	int error = 0;
 
-	status = wmidev_evaluate_method(rgb->wdev, 0, method, &input, &output);
+	status = asense_evaluate_method(rgb, method, &input, &output);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
@@ -631,54 +657,46 @@ static int asense_write_battery(struct asense_rgb *rgb, u8 function,
 	return result[0] == 0 ? 0 : -EREMOTEIO;
 }
 
-static int asense_read_usb(struct asense_rgb *rgb, u8 *threshold)
+static bool asense_usb_threshold_valid(u8 threshold)
+{
+	return threshold == 10 || threshold == 20 || threshold == 30;
+}
+
+static int asense_read_usb(struct asense_rgb *rgb,
+			   struct asense_usb_state *state)
 {
 	u64 result;
+	u8 mode;
 	int error;
 
 	error = asense_scalar_call(rgb, ASENSE_FUNCTION_GET,
 				   ASENSE_USB_GET, &result);
 	if (error)
 		return error;
-	switch (result) {
-	case ASENSE_USB_OFF:
-		*threshold = 0;
-		break;
-	case ASENSE_USB_10:
-		*threshold = 10;
-		break;
-	case ASENSE_USB_20:
-		*threshold = 20;
-		break;
-	case ASENSE_USB_30:
-		*threshold = 30;
-		break;
-	default:
+	if (FIELD_GET(ASENSE_USB_STATUS_MASK, result))
+		return -EREMOTEIO;
+	mode = FIELD_GET(ASENSE_USB_MODE_MASK, result);
+	if (mode != ASENSE_USB_MODE_ENABLED &&
+	    mode != ASENSE_USB_MODE_DISABLED)
 		return -EPROTO;
-	}
+	state->threshold = FIELD_GET(ASENSE_USB_THRESHOLD_MASK, result);
+	if (!asense_usb_threshold_valid(state->threshold))
+		return -EPROTO;
+	state->enabled = mode == ASENSE_USB_MODE_ENABLED;
 	return 0;
 }
 
-static int asense_write_usb(struct asense_rgb *rgb, u8 threshold)
+static int asense_write_usb(struct asense_rgb *rgb,
+			    const struct asense_usb_state *state)
 {
-	u64 payload;
+	u64 payload = ASENSE_USB_SET_COMMAND;
 
-	switch (threshold) {
-	case 0:
-		payload = ASENSE_USB_OFF | ASENSE_USB_SET_COMMAND;
-		break;
-	case 10:
-		payload = ASENSE_USB_10 | ASENSE_USB_SET_COMMAND;
-		break;
-	case 20:
-		payload = ASENSE_USB_20 | ASENSE_USB_SET_COMMAND;
-		break;
-	case 30:
-		payload = ASENSE_USB_30 | ASENSE_USB_SET_COMMAND;
-		break;
-	default:
+	if (!asense_usb_threshold_valid(state->threshold))
 		return -EINVAL;
-	}
+	payload |= FIELD_PREP(ASENSE_USB_MODE_MASK,
+			      state->enabled ? ASENSE_USB_MODE_ENABLED :
+			      ASENSE_USB_MODE_DISABLED);
+	payload |= FIELD_PREP(ASENSE_USB_THRESHOLD_MASK, state->threshold);
 	return asense_scalar_set(rgb, ASENSE_FUNCTION_SET, payload);
 }
 
@@ -815,15 +833,17 @@ static int asense_restore_battery(struct asense_rgb *rgb, u8 function,
 	return error;
 }
 
-static int asense_restore_usb(struct asense_rgb *rgb, u8 expected)
+static int asense_restore_usb(struct asense_rgb *rgb,
+			      const struct asense_usb_state *expected)
 {
-	u8 actual;
+	struct asense_usb_state actual;
 	int error;
 
 	error = asense_write_usb(rgb, expected);
 	if (!error)
 		error = asense_read_usb(rgb, &actual);
-	if (!error && actual != expected)
+	if (!error && (actual.enabled != expected->enabled ||
+		       actual.threshold != expected->threshold))
 		error = -EIO;
 	return error;
 }
@@ -1431,13 +1451,14 @@ static ssize_t usb_charging_show(struct device *dev,
 				 struct device_attribute *attr, char *buffer)
 {
 	struct asense_rgb *rgb = dev_get_drvdata(dev);
-	u8 threshold;
+	struct asense_usb_state state;
 	ssize_t length;
 	int error;
 
 	mutex_lock(&rgb->lock);
-	error = asense_read_usb(rgb, &threshold);
-	length = error ? error : sysfs_emit(buffer, "%u\n", threshold);
+	error = asense_read_usb(rgb, &state);
+	length = error ? error :
+		sysfs_emit(buffer, "%u\n", state.enabled ? state.threshold : 0);
 	mutex_unlock(&rgb->lock);
 	return length;
 }
@@ -1447,30 +1468,42 @@ static ssize_t usb_charging_store(struct device *dev,
 				  const char *buffer, size_t count)
 {
 	struct asense_rgb *rgb = dev_get_drvdata(dev);
-	u8 requested, previous, actual;
-	bool previous_valid;
+	struct asense_usb_state previous, requested, actual;
+	u8 requested_threshold;
 	int error;
 
-	error = kstrtou8(buffer, 10, &requested);
+	error = kstrtou8(buffer, 10, &requested_threshold);
 	if (error)
 		return error;
-	if (requested != 0 && requested != 10 &&
-	    requested != 20 && requested != 30)
+	if (requested_threshold != 0 &&
+	    !asense_usb_threshold_valid(requested_threshold))
 		return -EINVAL;
 	mutex_lock(&rgb->lock);
 	error = asense_read_usb(rgb, &previous);
-	previous_valid = !error;
-	if (!error && previous == requested) {
+	if (error) {
+		mutex_unlock(&rgb->lock);
+		return error;
+	}
+	requested = previous;
+	if (requested_threshold) {
+		requested.enabled = true;
+		requested.threshold = requested_threshold;
+	} else {
+		/* Disabling preserves the firmware's last selected threshold. */
+		requested.enabled = false;
+	}
+	if (previous.enabled == requested.enabled &&
+	    previous.threshold == requested.threshold) {
 		mutex_unlock(&rgb->lock);
 		return count;
 	}
-	if (!error)
-		error = asense_write_usb(rgb, requested);
+	error = asense_write_usb(rgb, &requested);
 	if (!error)
 		error = asense_read_usb(rgb, &actual);
-	if (!error && actual != requested)
+	if (!error && (actual.enabled != requested.enabled ||
+		       actual.threshold != requested.threshold))
 		error = -EIO;
-	if (error && previous_valid && asense_restore_usb(rgb, previous))
+	if (error && asense_restore_usb(rgb, &previous))
 		dev_err(dev, "USB charging rollback failed\n");
 	mutex_unlock(&rgb->lock);
 	return error ? error : count;
@@ -2133,10 +2166,10 @@ static int asense_probe_battery(struct asense_rgb *rgb)
 
 static int asense_probe_apge(struct asense_rgb *rgb)
 {
+	struct asense_usb_state usb;
 	bool enabled;
-	u8 threshold;
 
-	rgb->usb_available = !asense_read_usb(rgb, &threshold);
+	rgb->usb_available = !asense_read_usb(rgb, &usb);
 	rgb->timeout_available = !asense_read_timeout(rgb, &enabled) ||
 		asense_reference_model();
 	if (!rgb->usb_available && !rgb->timeout_available)
@@ -2194,7 +2227,8 @@ MODULE_DEVICE_TABLE(wmi, asense_rgb_id_table);
 static struct wmi_driver asense_rgb_driver = {
 	.driver = {
 		.name = "asense_rgb",
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+		/* The firmware mailbox is shared by all matched WMI endpoints. */
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
 		.pm = pm_sleep_ptr(&asense_rgb_pm_ops),
 	},
 	.id_table = asense_rgb_id_table,
@@ -2210,4 +2244,4 @@ module_wmi_driver(asense_rgb_driver);
 MODULE_AUTHOR("ASense contributors");
 MODULE_DESCRIPTION("Bounded Acer Gaming, Battery and APGE WMI transport");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.2.1");
+MODULE_VERSION("0.2.2");

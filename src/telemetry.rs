@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 const HARDWARE_FREQUENCY_REFRESH_SAMPLES: u8 = 5;
 const NVIDIA_SLOW_REFRESH_SAMPLES: u8 = 10;
 const NVIDIA_RETRY_MAX_SAMPLES: u8 = 30;
+const NVIDIA_IDLE_RELEASE_SAMPLES: u8 = 5;
+const NVIDIA_IDLE_REOPEN_HOLDOFF_SAMPLES: u8 = 5;
 
 #[derive(Debug)]
 pub enum TelemetryError {
@@ -40,12 +42,28 @@ impl fmt::Display for TelemetryError {
                 operation,
                 path,
                 source,
-            } => write!(f, "{operation} {}: {source}", path.display()),
+            } => {
+                write!(f, "{operation} {}: {source}", path.display())?;
+                if is_descriptor_exhaustion(source) {
+                    write!(
+                        f,
+                        "; descriptor table exhausted (EMFILE/ENFILE), retrying cannot recover leaked descriptors; restart the affected process"
+                    )?;
+                }
+                Ok(())
+            }
             Self::InvalidData { source, detail } => {
                 write!(f, "invalid {source} telemetry: {detail}")
             }
         }
     }
+}
+
+fn is_descriptor_exhaustion(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE) | Some(libc::ENFILE)
+    )
 }
 
 impl Error for TelemetryError {
@@ -234,7 +252,10 @@ pub struct TelemetryReader {
     nvidia_pci_identity: Option<PciIdentity>,
     nvidia_exact_oem_target: bool,
     nvidia_runtime_sleeping: bool,
+    nvidia_runtime_can_suspend: bool,
+    nvidia_runtime_usage: Option<u32>,
     nvidia_retry: SampleBackoff,
+    nvidia_idle_lifecycle: NvidiaIdleLifecycle,
     hardware_info: Option<HardwareInfo>,
     cpu_online_ids: Option<BTreeSet<u32>>,
     hardware_frequency_refresh: u8,
@@ -258,6 +279,78 @@ struct NvidiaSlowTelemetry {
 struct SampleBackoff {
     samples_until_retry: u8,
     next_delay: u8,
+}
+
+/// Keeps one NVML session across normal 1 Hz samples, then permits one
+/// bounded release attempt after a confidently idle streak. If runtime PM
+/// has not suspended the device after the grace period, ASense may reopen
+/// once, but it will not repeat the close/open cycle until real GPU activity
+/// rearms the lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NvidiaIdleLifecycle {
+    idle_samples: u8,
+    reopen_holdoff_samples: u8,
+    release_armed: bool,
+}
+
+impl Default for NvidiaIdleLifecycle {
+    fn default() -> Self {
+        Self {
+            idle_samples: 0,
+            reopen_holdoff_samples: 0,
+            release_armed: true,
+        }
+    }
+}
+
+impl NvidiaIdleLifecycle {
+    fn discovery_allowed(&mut self) -> bool {
+        if self.reopen_holdoff_samples > 0 {
+            self.reopen_holdoff_samples -= 1;
+            return false;
+        }
+        true
+    }
+
+    fn observe_live_sample(
+        &mut self,
+        runtime_can_suspend: bool,
+        _runtime_usage: Option<u32>,
+        idle: bool,
+    ) -> bool {
+        // runtime_usage counts references, not their owners. A live NVML
+        // session may therefore keep it positive itself; it must never veto
+        // an idle release. Zero is still useful before discovery, where it
+        // passively proves that there is no runtime-PM user to observe.
+        if !runtime_can_suspend {
+            self.idle_samples = 0;
+            self.release_armed = true;
+            self.reopen_holdoff_samples = 0;
+            return false;
+        }
+        if !idle {
+            self.idle_samples = 0;
+            self.release_armed = true;
+            return false;
+        }
+        if !self.release_armed {
+            return false;
+        }
+
+        self.idle_samples = self.idle_samples.saturating_add(1);
+        if self.idle_samples < NVIDIA_IDLE_RELEASE_SAMPLES {
+            return false;
+        }
+
+        self.idle_samples = 0;
+        self.reopen_holdoff_samples = NVIDIA_IDLE_REOPEN_HOLDOFF_SAMPLES;
+        self.release_armed = false;
+        true
+    }
+
+    fn reset_for_runtime_transition(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl Default for SampleBackoff {
@@ -307,7 +400,10 @@ impl TelemetryReader {
             nvidia_pci_identity: None,
             nvidia_exact_oem_target: false,
             nvidia_runtime_sleeping: false,
+            nvidia_runtime_can_suspend: false,
+            nvidia_runtime_usage: None,
             nvidia_retry: SampleBackoff::default(),
+            nvidia_idle_lifecycle: NvidiaIdleLifecycle::default(),
             hardware_info: None,
             cpu_online_ids: None,
             hardware_frequency_refresh: 0,
@@ -354,18 +450,31 @@ impl TelemetryReader {
         if identity_changed {
             self.hardware_info = None;
             self.nvidia_static = None;
+            self.nvidia_idle_lifecycle.reset_for_runtime_transition();
         }
         self.nvidia_pci_bus_id = Some(pci_device.bus_id.clone());
         self.nvidia_pci_identity = Some(pci_device.identity);
         self.nvidia_exact_oem_target = pci_device.is_exact_oem_target();
         self.nvidia_runtime_sleeping =
             pci_device.runtime_status == crate::nvidia::NvidiaRuntimeStatus::Suspended;
+        self.nvidia_runtime_can_suspend =
+            pci_device.runtime_status == crate::nvidia::NvidiaRuntimeStatus::Active;
+        self.nvidia_runtime_usage = pci_device.runtime_usage;
 
         if !pci_device.runtime_status.permits_live_nvml() {
             self.drop_nvidia_for_runtime_state(
                 Some(&pci_device.bus_id),
                 pci_device.runtime_status == crate::nvidia::NvidiaRuntimeStatus::Suspended,
             );
+            return;
+        }
+
+        // Unlike NVML utilization, runtime_usage is passive and does not
+        // require opening the driver API. Zero means there is no external
+        // runtime-PM user to observe, so keep the dGPU eligible for RTD3.
+        if self.nvidia_runtime_can_suspend && pci_device.runtime_usage == Some(0) {
+            self.release_nvidia_after_idle();
+            self.nvidia_idle_lifecycle.reset_for_runtime_transition();
             return;
         }
 
@@ -381,8 +490,16 @@ impl TelemetryReader {
             self.nvidia_slow_refresh = 0;
             self.nvidia_retry.record_success();
         }
-        if self.nvidia.is_none() && self.nvidia_retry.retry_due() {
-            self.discover_nvidia(&pci_device, root);
+        if self.nvidia.is_none() {
+            // Apply the post-release holdoff even when runtime_usage is
+            // available. A positive counter does not identify its owner and
+            // must not trigger an immediate close/open cycle.
+            if !self.nvidia_idle_lifecycle.discovery_allowed() {
+                return;
+            }
+            if self.nvidia_retry.retry_due() {
+                self.discover_nvidia(&pci_device, root);
+            }
         }
     }
 
@@ -392,8 +509,11 @@ impl TelemetryReader {
         self.nvidia_slow = NvidiaSlowTelemetry::default();
         self.nvidia_slow_refresh = 0;
         self.nvidia_retry.record_success();
+        self.nvidia_idle_lifecycle.reset_for_runtime_transition();
         self.nvidia_pci_bus_id = bus_id.map(str::to_owned);
         self.nvidia_runtime_sleeping = sleeping;
+        self.nvidia_runtime_can_suspend = false;
+        self.nvidia_runtime_usage = None;
         if bus_id.is_none() {
             self.nvidia_exact_oem_target = false;
         }
@@ -409,6 +529,7 @@ impl TelemetryReader {
         self.nvidia_slow = NvidiaSlowTelemetry::default();
         self.nvidia_slow_refresh = 0;
         self.nvidia_retry.record_failure();
+        self.nvidia_idle_lifecycle.reset_for_runtime_transition();
     }
 
     /// Forces the next samples to reopen NVML. This is intentionally cheap for
@@ -419,8 +540,8 @@ impl TelemetryReader {
         self.nvidia_retry.record_success();
     }
 
-    fn refresh_nvidia_slow(&mut self, controller: Option<&NvidiaController>) {
-        let Some(controller) = controller else {
+    fn refresh_nvidia_slow(&mut self) {
+        let Some(controller) = self.nvidia.as_ref() else {
             self.nvidia_slow = NvidiaSlowTelemetry::default();
             self.nvidia_slow_refresh = 0;
             return;
@@ -464,17 +585,23 @@ impl TelemetryReader {
         self.nvidia_slow = slow;
     }
 
+    fn release_nvidia_after_idle(&mut self) {
+        self.nvidia = None;
+        self.nvidia_discovery_error = None;
+        self.nvidia_slow = NvidiaSlowTelemetry::default();
+        self.nvidia_slow_refresh = 0;
+        self.nvidia_retry.record_success();
+    }
+
     pub fn sample(&mut self, hardware: &AcerHardware) -> Result<SystemTelemetry, TelemetryError> {
         self.refresh_nvidia_lifecycle(hardware.root());
-        // Keep NVML sample-scoped. Dropping this local at the end of the
-        // sample calls nvmlShutdown and leaves RTD3 free to suspend the dGPU
-        // after the external workload disappears.
-        let mut nvidia_controller = self.nvidia.take();
-        self.refresh_nvidia_slow(nvidia_controller.as_ref());
+        // Keep the controller resident across active 1 Hz samples. Repeated
+        // nvmlInit/nvmlShutdown cycles leak a driver eventfd on affected
+        // mobile-driver builds and eventually freeze the WebView host.
+        self.refresh_nvidia_slow();
         if self.nvidia_slow.session_lost {
             let detail = self.nvidia_slow.errors.join("; ");
             self.lose_nvidia_session(detail);
-            nvidia_controller = None;
         }
         let proc_stat = rooted(hardware.root(), "proc/stat");
         let cpu_times = read_cpu_times(&proc_stat)?;
@@ -497,40 +624,42 @@ impl TelemetryReader {
             find_labeled_temperature(hardware.root(), "coretemp", "Package id 0")?
                 .or(acer_cpu_temp);
 
-        let (mut nvidia, mut power, nvidia_errors, lost_session) = match nvidia_controller.as_ref()
-        {
-            Some(controller) => {
-                let live = controller.live_telemetry();
-                let mut errors = self
-                    .nvidia_static
-                    .as_ref()
-                    .map(|info| info.errors.clone())
-                    .unwrap_or_default();
-                errors.extend(live.errors.iter().cloned());
-                errors.extend(self.nvidia_slow.errors.iter().cloned());
-                let mut lost_session = live.session_lost;
-                let power = match controller.power_telemetry() {
-                    Ok(power) => Some(power),
-                    Err(error) => {
-                        lost_session |= error.invalidates_session();
-                        errors.push(format!("NVML power: {error}"));
-                        None
-                    }
-                };
-                (
-                    Some(nvidia_telemetry(&live, self.nvidia_static.as_ref())),
-                    power,
-                    errors,
-                    lost_session,
-                )
-            }
-            None => (
-                None,
-                None,
-                self.nvidia_discovery_error.clone().into_iter().collect(),
-                false,
-            ),
-        };
+        let (mut nvidia, mut power, nvidia_errors, lost_session, nvidia_runtime_idle) =
+            match self.nvidia.as_ref() {
+                Some(controller) => {
+                    let live = controller.live_telemetry();
+                    let mut errors = self
+                        .nvidia_static
+                        .as_ref()
+                        .map(|info| info.errors.clone())
+                        .unwrap_or_default();
+                    errors.extend(live.errors.iter().cloned());
+                    errors.extend(self.nvidia_slow.errors.iter().cloned());
+                    let mut lost_session = live.session_lost;
+                    let power = match controller.power_telemetry() {
+                        Ok(power) => Some(power),
+                        Err(error) => {
+                            lost_session |= error.invalidates_session();
+                            errors.push(format!("NVML power: {error}"));
+                            None
+                        }
+                    };
+                    (
+                        Some(nvidia_telemetry(&live, self.nvidia_static.as_ref())),
+                        power,
+                        errors,
+                        lost_session,
+                        Some(live.is_runtime_idle()),
+                    )
+                }
+                None => (
+                    None,
+                    None,
+                    self.nvidia_discovery_error.clone().into_iter().collect(),
+                    false,
+                    None,
+                ),
+            };
         if lost_session {
             let detail = if nvidia_errors.is_empty() {
                 "NVML session became unavailable".to_owned()
@@ -600,6 +729,21 @@ impl TelemetryReader {
         let profile = profile_raw
             .as_deref()
             .and_then(|raw| PlatformProfile::from_sysfs(raw).ok());
+
+        if !lost_session {
+            // A missing controller is not a non-idle NVML sample. In
+            // particular, do not rearm the lifecycle while its post-release
+            // holdoff deliberately keeps NVML closed.
+            if let Some(idle) = nvidia_runtime_idle
+                && self.nvidia_idle_lifecycle.observe_live_sample(
+                    self.nvidia_runtime_can_suspend,
+                    self.nvidia_runtime_usage,
+                    idle,
+                )
+            {
+                self.release_nvidia_after_idle();
+            }
+        }
 
         Ok(SystemTelemetry {
             cpu_temperature_c,
@@ -1887,6 +2031,102 @@ mod tests {
     }
 
     #[test]
+    fn missing_runtime_usage_releases_once_after_a_confident_idle_streak() {
+        let mut lifecycle = NvidiaIdleLifecycle::default();
+
+        for _ in 1..NVIDIA_IDLE_RELEASE_SAMPLES {
+            assert!(!lifecycle.observe_live_sample(true, None, true));
+        }
+        assert!(lifecycle.observe_live_sample(true, None, true));
+
+        for _ in 0..NVIDIA_IDLE_REOPEN_HOLDOFF_SAMPLES {
+            assert!(!lifecycle.discovery_allowed());
+        }
+        assert!(lifecycle.discovery_allowed());
+
+        // The single compatibility reopen must not begin another
+        // shutdown/reopen loop while the GPU remains idle.
+        for _ in 0..(NVIDIA_IDLE_RELEASE_SAMPLES * 3) {
+            assert!(!lifecycle.observe_live_sample(true, None, true));
+        }
+    }
+
+    #[test]
+    fn positive_runtime_usage_does_not_block_the_single_idle_release() {
+        let mut lifecycle = NvidiaIdleLifecycle::default();
+
+        for sample in 1..=NVIDIA_IDLE_RELEASE_SAMPLES {
+            let release = lifecycle.observe_live_sample(true, Some(1), true);
+            assert_eq!(release, sample == NVIDIA_IDLE_RELEASE_SAMPLES);
+        }
+        assert!(!lifecycle.release_armed);
+
+        for _ in 0..NVIDIA_IDLE_REOPEN_HOLDOFF_SAMPLES {
+            assert!(!lifecycle.discovery_allowed());
+        }
+        assert!(lifecycle.discovery_allowed());
+
+        // Reopening while the external usage count is still positive must
+        // not start a periodic init/shutdown loop. Real activity rearms it.
+        for _ in 0..(NVIDIA_IDLE_RELEASE_SAMPLES * 3) {
+            assert!(!lifecycle.observe_live_sample(true, Some(2), true));
+        }
+        assert!(!lifecycle.observe_live_sample(true, Some(2), false));
+        assert!(lifecycle.release_armed);
+    }
+
+    #[test]
+    fn nvidia_activity_rearms_idle_release_but_unsupported_runtime_pm_does_not_release() {
+        let mut lifecycle = NvidiaIdleLifecycle::default();
+        for _ in 0..NVIDIA_IDLE_RELEASE_SAMPLES {
+            assert!(!lifecycle.observe_live_sample(false, None, true));
+        }
+
+        for _ in 0..NVIDIA_IDLE_RELEASE_SAMPLES {
+            let release = lifecycle.observe_live_sample(true, None, true);
+            if release {
+                break;
+            }
+        }
+        assert!(!lifecycle.release_armed);
+
+        assert!(!lifecycle.observe_live_sample(true, None, false));
+        assert!(lifecycle.release_armed);
+        for _ in 1..NVIDIA_IDLE_RELEASE_SAMPLES {
+            assert!(!lifecycle.observe_live_sample(true, None, true));
+        }
+        assert!(lifecycle.observe_live_sample(true, None, true));
+    }
+
+    #[test]
+    fn nvidia_runtime_transition_resets_idle_release_and_holdoff() {
+        let mut lifecycle = NvidiaIdleLifecycle::default();
+        for _ in 0..NVIDIA_IDLE_RELEASE_SAMPLES {
+            let _ = lifecycle.observe_live_sample(true, None, true);
+        }
+        assert!(!lifecycle.discovery_allowed());
+
+        lifecycle.reset_for_runtime_transition();
+        assert!(lifecycle.discovery_allowed());
+        assert!(lifecycle.release_armed);
+        assert_eq!(lifecycle.idle_samples, 0);
+    }
+
+    #[test]
+    fn descriptor_exhaustion_error_says_retry_cannot_recover_it() {
+        for errno in [libc::EMFILE, libc::ENFILE] {
+            let error = TelemetryError::Io {
+                operation: "read",
+                path: PathBuf::from("/proc/stat"),
+                source: std::io::Error::from_raw_os_error(errno),
+            };
+            let message = error.to_string();
+            assert!(message.contains("descriptor table exhausted"));
+            assert!(message.contains("retrying cannot recover"));
+        }
+    }
+
+    #[test]
     fn sleeping_nvidia_is_healthy_and_clears_live_epoch_state() {
         let root = minimal_acer_telemetry_fixture("nvidia-suspended");
         let pci = root.join("sys/bus/pci/devices/0000:02:00.0");
@@ -1978,7 +2218,7 @@ mod tests {
         reader.nvidia_slow.core_offset_mhz = Some(100);
         reader.nvidia_slow.memory_offset_mhz = Some(200);
         reader.nvidia_slow_refresh = NVIDIA_SLOW_REFRESH_SAMPLES;
-        reader.refresh_nvidia_slow(None);
+        reader.refresh_nvidia_slow();
         assert_eq!(reader.nvidia_slow, NvidiaSlowTelemetry::default());
         assert_eq!(reader.nvidia_slow_refresh, 0);
     }
@@ -2123,7 +2363,10 @@ mod tests {
             nvidia_pci_identity: None,
             nvidia_exact_oem_target: false,
             nvidia_runtime_sleeping: false,
+            nvidia_runtime_can_suspend: false,
+            nvidia_runtime_usage: None,
             nvidia_retry: SampleBackoff::default(),
+            nvidia_idle_lifecycle: NvidiaIdleLifecycle::default(),
             hardware_info: None,
             cpu_online_ids: None,
             hardware_frequency_refresh: 0,
@@ -2270,12 +2513,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a live Acer/NVIDIA laptop"]
-    fn live_sample_releases_its_nvml_controller_before_returning() {
-        let hardware = AcerHardware::discover().unwrap();
-        let mut reader = TelemetryReader::new();
-        let _ = reader.sample(&hardware).unwrap();
-        assert!(reader.nvidia.is_none());
+    fn sample_keeps_nvml_controller_owned_by_the_reader() {
+        let source = include_str!("telemetry.rs");
+        let sample = source.split("pub fn sample").nth(1).unwrap();
+        assert!(!sample.contains("self.nvidia.take()"));
+        assert!(sample.contains("match self.nvidia.as_ref()"));
     }
 
     fn fixture_root(label: &str) -> PathBuf {
@@ -2313,10 +2555,13 @@ mod tests {
             nvidia_pci_identity: None,
             nvidia_exact_oem_target: false,
             nvidia_runtime_sleeping: false,
+            nvidia_runtime_can_suspend: false,
+            nvidia_runtime_usage: None,
             nvidia_retry: SampleBackoff {
                 samples_until_retry: NVIDIA_RETRY_MAX_SAMPLES,
                 next_delay: NVIDIA_RETRY_MAX_SAMPLES,
             },
+            nvidia_idle_lifecycle: NvidiaIdleLifecycle::default(),
             hardware_info: None,
             cpu_online_ids: None,
             hardware_frequency_refresh: 0,
