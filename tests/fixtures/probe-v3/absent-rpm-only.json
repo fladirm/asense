@@ -1,0 +1,86 @@
+{
+  "schema": 3,
+  "provenance": {
+    "report": "asense-probe",
+    "asense_version": "0.3.0",
+    "build_commit": null,
+    "captured_at_utc": "2026-08-01T12:10:00Z",
+    "capture_duration_ms": 11,
+    "mode": "passive",
+    "daemon": { "status": "absent", "source": "control-socket", "reason": "daemon-unavailable" }
+  },
+  "machine": {
+    "dmi": {
+      "vendor": { "status": "value", "source": "dmi-vendor", "value": "Acer" },
+      "product": { "status": "value", "source": "dmi-product", "value": "Nitro Example" },
+      "board": { "status": "absent", "source": "dmi-board", "reason": "not-exposed" },
+      "bios": { "status": "error", "source": "dmi-bios", "error": { "stage": "read", "class": "permission-denied", "errno": 13 } }
+    },
+    "kernel": {
+      "release": { "status": "value", "source": "uname", "value": "7.1.4-zen1-1-zen" },
+      "architecture": { "status": "value", "source": "uname", "value": "x86_64" }
+    },
+    "os": {
+      "id": { "status": "value", "source": "os-release", "value": "arch" },
+      "version_id": { "status": "absent", "source": "os-release", "reason": "not-exposed" }
+    }
+  },
+  "power": { "ac": [], "batteries": [] },
+  "drivers": {
+    "modules": [
+      { "name": "acer_wmi", "loaded": { "status": "value", "source": "module-sysfs", "value": true }, "version": { "status": "absent", "source": "module-sysfs", "reason": "not-exposed" } },
+      { "name": "asense_rgb", "loaded": { "status": "value", "source": "module-sysfs", "value": false }, "version": { "status": "absent", "source": "module-sysfs", "reason": "not-exposed" } }
+    ],
+    "wmi": [],
+    "hwmon_owner": { "status": "value", "source": "hwmon-driver", "value": "acer_wmi" }
+  },
+  "profile": {
+    "transport": { "status": "absent", "source": "profile-discovery", "reason": "not-exposed" },
+    "current": { "status": "absent", "source": "profile-discovery", "reason": "not-exposed" },
+    "choices": { "status": "absent", "source": "profile-discovery", "reason": "not-exposed" },
+    "firmware_supported_bitmap": { "status": "absent", "source": "gaming-wmi-supported-profiles", "reason": "not-exposed" },
+    "physical_effect": "unverified"
+  },
+  "fans": {
+    "control": { "status": "absent", "source": "fan-discovery", "reason": "incomplete-control-interface" },
+    "rpm": [
+      { "channel": 1, "label": "CPU", "read": { "status": "value", "source": "acer-hwmon", "value": 2700 } },
+      { "channel": 2, "label": "GPU", "read": { "status": "error", "source": "acer-hwmon", "error": { "stage": "read", "class": "io", "errno": 5 } } }
+    ],
+    "pwm": [],
+    "temperatures": []
+  },
+  "platform": {
+    "transport": { "status": "absent", "source": "platform-discovery", "reason": "not-exposed" },
+    "fields": [
+      { "name": "battery-limit", "expected": false, "exposed": false, "source": "asense-battery", "read": { "status": "absent", "source": "asense-battery", "reason": "not-exposed" } },
+      { "name": "battery-calibration", "expected": false, "exposed": false, "source": "asense-battery", "read": { "status": "absent", "source": "asense-battery", "reason": "not-exposed" } },
+      { "name": "usb-off-charging", "expected": false, "exposed": false, "source": "asense-apge", "read": { "status": "absent", "source": "asense-apge", "reason": "not-exposed" } },
+      { "name": "keyboard-timeout", "expected": false, "exposed": false, "source": "asense-apge", "read": { "status": "absent", "source": "asense-apge", "reason": "not-exposed" } },
+      { "name": "boot-sound", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } },
+      { "name": "lcd-override", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } },
+      { "name": "rear-logo", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } }
+    ]
+  },
+  "lighting": [],
+  "hid": [],
+  "privacy": {
+    "automatic_upload": false,
+    "persistent_report_id": false,
+    "default_mutations": [],
+    "extended_mutations": [],
+    "excluded": [
+      "serials", "uuids", "hostname", "user-identity", "network-identity",
+      "boot-id", "storage-identity", "hid-serial-and-physical-path",
+      "journals", "raw-acpi-tables", "absolute-device-paths", "environment"
+    ],
+    "bounded_raw": [
+      { "path": "profile.current.raw", "max_bytes": 48 },
+      { "path": "profile.choices.value[].transport_raw", "max_bytes": 1 },
+      { "path": "profile.firmware_supported_bitmap.value.raw", "max_bytes": 1 },
+      { "path": "platform.fields[].read.error.raw", "max_bytes": 8 },
+      { "path": "hid[].a1.value.payload", "max_bytes": 64 },
+      { "path": "hid[].extended.a3[].read.value.payload", "max_bytes": 64 }
+    ]
+  }
+}

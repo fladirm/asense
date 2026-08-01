@@ -311,10 +311,6 @@ fn legacy_group_with(wmi_root: &Path, guid: &str, attribute: &str) -> Option<Pat
     find_wmi_group(wmi_root, guid, "asense_rgb").filter(|base| base.join(attribute).is_file())
 }
 
-pub(crate) fn find_wmi_device(wmi_root: &Path, guid: &str) -> Option<PathBuf> {
-    matching_wmi_devices(wmi_root, guid).into_iter().next()
-}
-
 pub(crate) fn find_wmi_group(wmi_root: &Path, guid: &str, group: &str) -> Option<PathBuf> {
     matching_wmi_devices(wmi_root, guid)
         .into_iter()

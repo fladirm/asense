@@ -11,7 +11,11 @@ use std::env;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let result = match args.get(1).map(String::as_str) {
-        Some("--probe" | "probe") => print_probe(),
+        Some("--probe" | "probe") => match args.get(2).map(String::as_str) {
+            None => print_probe(),
+            Some("--summary") if args.len() == 3 => print_probe_summary(),
+            _ => Err("usage: asense probe [--summary]".to_string()),
+        },
         Some("--toggle") => launch_gui(gui_instance::Mode::Toggle),
         Some(flag) if flag.starts_with('-') => Err(format!("unknown option: {flag}")),
         _ => launch_gui(gui_instance::Mode::Open),
@@ -33,5 +37,10 @@ fn launch_gui(mode: gui_instance::Mode) -> Result<(), String> {
 
 fn print_probe() -> Result<(), String> {
     print!("{}", probe::generate()?);
+    Ok(())
+}
+
+fn print_probe_summary() -> Result<(), String> {
+    print!("{}", probe::generate_summary()?);
     Ok(())
 }

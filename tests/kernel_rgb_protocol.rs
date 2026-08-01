@@ -299,6 +299,71 @@ fn kernel_surface_never_exposes_raw_wmi_method_dispatch() {
 }
 
 #[test]
+fn passive_diagnostic_surface_is_fixed_admin_read_only_and_endpoint_filtered() {
+    for attribute in [
+        "profile_raw",
+        "diagnostic_cpu_mode",
+        "diagnostic_gpu_mode",
+        "diagnostic_cpu_speed",
+        "diagnostic_gpu_speed",
+        "battery_raw",
+        "usb_raw",
+        "timeout_raw",
+        "boot_sound_raw",
+        "lcd_raw",
+        "rear_logo_raw",
+    ] {
+        assert!(
+            DRIVER.contains(&format!("DEVICE_ATTR_ADMIN_RO({attribute})")),
+            "diagnostic attribute is not admin read-only: {attribute}"
+        );
+        assert!(
+            !DRIVER.contains(&format!("DEVICE_ATTR_ADMIN_RW({attribute})")),
+            "diagnostic attribute became writable: {attribute}"
+        );
+        assert!(
+            !DRIVER.contains(&format!("{attribute}_store")),
+            "diagnostic attribute has a store function: {attribute}"
+        );
+    }
+
+    let diagnostics = function_between(
+        "static ssize_t profile_raw_show",
+        "static int asense_rgb_suspend",
+    );
+    for forbidden in [
+        "asense_write_",
+        "asense_scalar_set",
+        "asense_set_call",
+        "wmidev_evaluate_method",
+    ] {
+        assert!(
+            !diagnostics.contains(forbidden),
+            "passive diagnostic getter contains a write/raw dispatch: {forbidden}"
+        );
+    }
+
+    let visibility = body("asense_diagnostic_is_visible", "asense_diagnostic_group");
+    for endpoint in [
+        "case ASENSE_ENDPOINT_GAMING",
+        "case ASENSE_ENDPOINT_BATTERY",
+        "case ASENSE_ENDPOINT_APGE",
+    ] {
+        assert!(visibility.contains(endpoint));
+    }
+    assert!(DRIVER.contains(".name = \"asense_diagnostics\""));
+
+    let probe = body("asense_rgb_probe", "asense_gaming_endpoint");
+    let diagnostic_group = probe
+        .find("devm_device_add_group(&wdev->dev, &asense_diagnostic_group)")
+        .expect("probe must register the fixed diagnostic group");
+    let dispatch = probe
+        .find("switch (endpoint->type)")
+        .expect("probe must dispatch the known endpoint");
+    assert!(diagnostic_group < dispatch);
+}
+
+#[test]
 fn verified_optional_controls_decode_phn16_72_v118_responses() {
     let battery = body("asense_read_battery", "asense_write_battery");
     for required in [
@@ -359,7 +424,8 @@ fn verified_optional_controls_remain_visible_across_early_boot_probe_failures() 
         "rgb->lcd_available = !asense_read_lcd(rgb, &enabled) || asense_reference_model()"
     ));
     let battery_probe = body("asense_probe_battery", "asense_probe_apge");
-    assert!(battery_probe.contains("if (!asense_reference_model()) return -ENODEV"));
+    assert!(battery_probe.contains("if (!asense_reference_model()) return 0"));
+    assert!(!battery_probe.contains("return -ENODEV"));
     assert!(battery_probe.contains("rgb->battery_limit_available = true"));
     assert!(battery_probe.contains("rgb->battery_calibration_available = true"));
 

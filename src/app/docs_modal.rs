@@ -489,7 +489,7 @@ fn UsagePane(active: DocsTab, language: Language) -> Element {
             pre { code { "{RELEASE_INSTALL}" } }
 
             h3 { {tr(language, "Spuštění, diagnostika a odstranění", "Run, probe and uninstall")} }
-            pre { code { "asense\nasense probe > asense-probe.json\nsudo apt remove asense\nsudo apt purge asense" } }
+            pre { code { "asense\nasense probe > asense-probe.json\nasense probe --summary\nsudo apt remove asense\nsudo apt purge asense" } }
             p { {tr(
                 language,
                 "Před spuštěním probe zavřete okno ASense, aby jednorázový dotaz mohl použít jedinou control session daemonu.",
@@ -497,8 +497,8 @@ fn UsagePane(active: DocsTab, language: Language) -> Element {
             )} }
             p { {tr(
                 language,
-                "Probe obsahuje model, profily, ventilátory a známé WMI/HID capability. Lokálnímu daemonu posílá jen HELLO a CAPS, aby podle dostupnosti doplnil typed zóny a režimy ENEK5130; neposílá setter a bez daemonu použije pasivní HID fallback. Vynechává serial, UUID, hostname, uživatele, síťové identifikátory, journal a surové ACPI tabulky. Před sdílením jej přesto zkontrolujte.",
-                "The probe contains model, profile, fan and known WMI/HID capability data. It sends only HELLO and CAPS to the local daemon to include typed ENEK5130 zones and modes when available; it sends no setter and uses passive HID fallback without the daemon. It omits serials, UUID, hostname, user and network identifiers, journals and raw ACPI tables. Review it before sharing.",
+                "Probe vytvoří autoritativní schema-3 JSON s modelem, napájením, profily, ventilátory a známými WMI/HID transporty. Daemonu po HELLO 2 posílá pouze pevný read-only požadavek DIAG PASSIVE; nevolá obecné capability discovery, neposílá ENEK selector ani setter a nic neuploaduje. Vynechává serialy, UUID, hostname, identitu uživatele, sítě, bootu a úložiště, HID fyzické cesty, journal, surové ACPI tabulky, absolutní cesty a prostředí procesu. Volba --summary je jen čitelný souhrn nové capture; JSON před sdílením zkontrolujte.",
+                "The probe creates the authoritative schema-3 JSON with model, power, profile, fan and known WMI/HID transport evidence. After HELLO 2 it sends only the fixed read-only DIAG PASSIVE request to the daemon; it does not call general capability discovery, send an ENEK selector or setter, or upload anything. It omits serials, UUIDs, hostname, user, network, boot and storage identity, HID physical paths, journals, raw ACPI tables, absolute paths and the process environment. --summary is only a readable view of a fresh capture; review the JSON before sharing.",
             )} }
             p { {tr(
                 language,

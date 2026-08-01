@@ -6,7 +6,23 @@ body:
     attributes:
       value: |
         Reports from real laptops expand the model matrix. ASense capabilities
-        are independent, so partial results are useful too.
+        are independent, so partial results are useful too. Close ASense and
+        capture both forms consecutively without changing machine state:
+
+        ```text
+        asense probe > asense-probe.json
+        asense probe --summary
+        ```
+
+        Schema 3 does not upload anything. Review the JSON before attaching it.
+
+  - type: input
+    id: version
+    attributes:
+      label: ASense version/build
+      placeholder: v0.3.0 package or exact commit
+    validations:
+      required: true
 
   - type: input
     id: model
@@ -57,11 +73,34 @@ body:
       required: true
 
   - type: textarea
+    id: captured_state
+    attributes:
+      label: Synchronized machine state
+      description: >-
+        State AC or battery, requested profile/fan/lighting mode, whether the
+        machine was resumed, and any live plug/unplug. Describe the state that
+        was active for both the physical test and the probe capture.
+      placeholder: AC online; Balanced; fans Auto; no suspend or plug change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: probe_summary
+    attributes:
+      label: Schema-3 probe summary
+      description: Paste the complete output of asense probe --summary.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
     id: probe
     attributes:
-      label: asense-probe.json
-      description: Run asense probe, review the JSON, then drag the file here.
-      placeholder: Attach asense-probe.json.
+      label: Schema-3 asense-probe.json
+      description: >-
+        Review the JSON generated immediately beside the summary, then drag
+        asense-probe.json here. The JSON attachment is the evidence authority.
+      placeholder: Attach the schema-3 asense-probe.json file.
     validations:
       required: true
 
@@ -73,4 +112,8 @@ body:
         - label: This report comes from the exact physical model named above.
           required: true
         - label: I reviewed the probe file before attaching it.
+          required: true
+        - label: The observed behavior and probe use the same installed ASense build.
+          required: true
+        - label: I did not reboot or reload relevant kernel modules between the test and capture.
           required: true

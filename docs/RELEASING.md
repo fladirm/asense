@@ -62,11 +62,13 @@ Release.
 Download that artifact, then verify all checksums:
 
 ```bash
-sha256sum --check asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip.sha256
-sha256sum --check asense-v0.2.2-source-*.zip.sha256
+version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
+test -n "$version"
+sha256sum --check asense-v"$version"-ubuntu-26.04-x86_64-installer-*.zip.sha256
+sha256sum --check asense-v"$version"-source-*.zip.sha256
 sha256sum --check SHA256SUMS
-unzip -t asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip
-unzip -t asense-v0.2.2-source-*.zip
+unzip -t asense-v"$version"-ubuntu-26.04-x86_64-installer-*.zip
+unzip -t asense-v"$version"-source-*.zip
 ```
 
 Install the downloaded installer on the reference PHN16-72 as the logged-in
@@ -76,8 +78,9 @@ leave the GUI open for at least 65 seconds and confirm that
 `power/runtime_status` remains `suspended`; opening ASense must not create an
 NVML session or wake the GPU.
 
-For the v0.2.2 telemetry hotfix, also keep an external NVIDIA workload and the
-ASense GUI active for at least 30 minutes. After warm-up, the GUI process file
+Retain the v0.2.2 telemetry regression as a permanent gate: keep an external
+NVIDIA workload and the ASense GUI active for at least 30 minutes. After
+warm-up, the GUI process file
 descriptor count in `/proc/<pid>/fd` must remain flat (allowing normal
 short-lived variation of approximately two descriptors), telemetry and Check
 must remain responsive, and no linear `anon_inode:[eventfd]` growth is
@@ -112,8 +115,9 @@ Before considering the release complete:
 2. verify that it has the accepted commit suffix and matching checksum;
 3. confirm protocol 2, `CAPS`, profiles, fan sessions, lighting, Battery/APGE,
    exact NVIDIA and hotkey behaviour, suspend/resume and uninstall;
-4. run `asense probe`, review the JSON for the documented privacy boundary and
-   confirm the client sends only `HELLO`/`CAPS`, never a mutation command;
+4. run `asense probe` and `asense probe --summary`, review the JSON for the
+   documented privacy boundary and confirm the probe sends only `HELLO 2` then
+   `DIAG PASSIVE`, never `CAPS` or a mutation command;
 5. confirm the provenance file identifies the tagged commit.
 
 Community reports on other Acer systems are valuable fixtures and may justify

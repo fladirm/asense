@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use std::{error::Error, fmt};
 
 use crate::nvidia::ClockEventReasons;
+use crate::passive_diagnostics::{self, PassiveDiagnostics};
 use crate::platform::{PlatformState, RearLogoState, UsbCharging, parse_state};
 use crate::telemetry::{MemoryHardwareInfo, parse_memory_hardware};
 use crate::tuning::GpuOffsetState;
@@ -20,9 +21,12 @@ pub use crate::{
 pub const CONTROL_SOCKET: &str = "/run/asense-control.sock";
 pub const CONTROL_PROTOCOL_VERSION: u16 = 2;
 pub(crate) const MAX_CONTROL_COMMAND_BYTES: usize = 192;
-pub(crate) const MAX_CONTROL_RESPONSE_LINE_BYTES: usize = 4096;
+pub(crate) const MAX_CONTROL_RESPONSE_LINE_BYTES: usize = 32_768;
 pub(crate) const MAX_CONTROL_RESPONSE_PAYLOAD_BYTES: usize =
     MAX_CONTROL_RESPONSE_LINE_BYTES - "ERR ".len();
+const _: () = assert!(
+    crate::passive_diagnostics::MAX_PASSIVE_DIAGNOSTICS_BYTES <= MAX_CONTROL_RESPONSE_PAYLOAD_BYTES
+);
 const CAPABILITIES_SCHEMA_VERSION: u8 = 1;
 const MAX_CAPABILITY_PROFILES: usize = 8;
 const MAX_CAPABILITY_FANS: usize = 8;
@@ -135,6 +139,7 @@ struct HandshakeReceipt {
 pub struct ControlClient {
     stream: UnixStream,
     reader: BufReader<UnixStream>,
+    handshake: Option<HandshakeReceipt>,
 }
 
 impl ControlClient {
@@ -157,7 +162,11 @@ impl ControlClient {
                 .try_clone()
                 .map_err(|error| ControlError::Transport(error.to_string()))?,
         );
-        let mut client = Self { stream, reader };
+        let mut client = Self {
+            stream,
+            reader,
+            handshake: None,
+        };
         let handshake = client
             .request(&format!("HELLO {CONTROL_PROTOCOL_VERSION}"))
             .map_err(|error| match error {
@@ -173,7 +182,17 @@ impl ControlClient {
                 handshake.protocol, handshake.daemon_version, CONTROL_PROTOCOL_VERSION
             )));
         }
+        client.handshake = Some(handshake);
         Ok(client)
+    }
+
+    /// Returns the already negotiated daemon identity without issuing another
+    /// command. This is used by the passive compatibility report and does not
+    /// invoke the capability-discovery path.
+    pub fn negotiated_daemon(&self) -> Option<(u16, &str)> {
+        self.handshake
+            .as_ref()
+            .map(|receipt| (receipt.protocol, receipt.daemon_version.as_str()))
     }
 
     pub fn fan_auto(&mut self) -> ControlResult<()> {
@@ -193,6 +212,16 @@ impl ControlClient {
     pub fn capabilities(&mut self) -> ControlResult<ControlCapabilities> {
         let response = self.request("CAPS")?;
         parse_control_capabilities(&response)
+    }
+
+    /// Returns the one bounded diagnostic snapshot used by probe schema 3.
+    /// This command is deliberately distinct from `CAPS`: it does not perform
+    /// lighting discovery or any other selector/write transaction.
+    pub(crate) fn passive_diagnostics(&mut self) -> ControlResult<PassiveDiagnostics> {
+        let response = self.request("DIAG PASSIVE")?;
+        passive_diagnostics::parse(&response).map_err(|error| {
+            ControlError::Protocol(format!("invalid passive diagnostic response: {error}"))
+        })
     }
 
     pub fn fan_maximum(&mut self) -> ControlResult<()> {
@@ -368,9 +397,9 @@ fn read_response_line(reader: &mut impl BufRead, deadline: Instant) -> ControlRe
             }
             Ok([]) => {
                 return if oversized {
-                    Err(ControlError::Protocol(
-                        "control response exceeded 4096 bytes".to_string(),
-                    ))
+                    Err(ControlError::Protocol(format!(
+                        "control response exceeded {MAX_CONTROL_RESPONSE_LINE_BYTES} bytes"
+                    )))
                 } else {
                     Err(ControlError::Transport(
                         "control service closed before completing its response".to_string(),
@@ -393,9 +422,9 @@ fn read_response_line(reader: &mut impl BufRead, deadline: Instant) -> ControlRe
                 reader.consume(consumed);
                 if newline.is_some() {
                     return if oversized {
-                        Err(ControlError::Protocol(
-                            "control response exceeded 4096 bytes".to_string(),
-                        ))
+                        Err(ControlError::Protocol(format!(
+                            "control response exceeded {MAX_CONTROL_RESPONSE_LINE_BYTES} bytes"
+                        )))
                     } else {
                         String::from_utf8(response).map_err(|_| {
                             ControlError::Protocol(
@@ -775,9 +804,11 @@ mod tests {
         parse_handshake, parse_profile_apply_receipt, parse_response, read_response_line,
     };
     use crate::nvidia::ClockEventReasons;
+    use crate::passive_diagnostics::{self, PassiveDiagnostics};
     use crate::tuning::GpuOffsetState;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -808,6 +839,7 @@ mod tests {
         let mut client = ControlClient {
             stream: client_stream,
             reader,
+            handshake: None,
         };
         let server = std::thread::spawn(move || {
             let mut reader = BufReader::new(server_stream.try_clone().unwrap());
@@ -840,6 +872,7 @@ mod tests {
         let mut client = ControlClient {
             stream: client_stream,
             reader,
+            handshake: None,
         };
         let server = std::thread::spawn(move || {
             let mut reader = BufReader::new(server_stream.try_clone().unwrap());
@@ -879,6 +912,7 @@ mod tests {
         let mut client = ControlClient {
             stream: client_stream,
             reader,
+            handshake: None,
         };
         let oversized = "a".repeat(super::MAX_CAPABILITY_TOKEN_BYTES + 1);
 
@@ -1127,6 +1161,67 @@ mod tests {
             .lighting
             .sort_by(|left, right| left.id.cmp(&right.id));
         assert_eq!(client.capabilities().unwrap(), expected);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn passive_diagnostics_uses_exactly_hello_then_diag_on_one_stream() {
+        let expected =
+            PassiveDiagnostics::collect_at(Path::new("/asense-test-passive-root-does-not-exist"));
+        let encoded = passive_diagnostics::encode(&expected).unwrap();
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server_stream.try_clone().unwrap());
+            let mut command = String::new();
+            reader.read_line(&mut command).unwrap();
+            assert_eq!(command, "HELLO 2\n");
+            server_stream
+                .write_all(b"OK protocol=2 daemon=0.3.0\n")
+                .unwrap();
+            command.clear();
+            reader.read_line(&mut command).unwrap();
+            assert_eq!(command, "DIAG PASSIVE\n");
+            writeln!(server_stream, "OK {encoded}").unwrap();
+            command.clear();
+            assert_eq!(reader.read_line(&mut command).unwrap(), 0);
+        });
+
+        let mut client = ControlClient::from_stream(client_stream).unwrap();
+        assert_eq!(client.negotiated_daemon(), Some((2, "0.3.0")));
+        assert_eq!(client.passive_diagnostics().unwrap(), expected);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn old_daemon_rejection_does_not_fall_back_to_caps() {
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server_stream.try_clone().unwrap());
+            let mut command = String::new();
+            reader.read_line(&mut command).unwrap();
+            assert_eq!(command, "HELLO 2\n");
+            server_stream
+                .write_all(b"OK protocol=2 daemon=0.2.2\n")
+                .unwrap();
+            command.clear();
+            reader.read_line(&mut command).unwrap();
+            assert_eq!(command, "DIAG PASSIVE\n");
+            server_stream
+                .write_all(b"ERR unsupported command\n")
+                .unwrap();
+            command.clear();
+            assert_eq!(reader.read_line(&mut command).unwrap(), 0);
+        });
+
+        let mut client = ControlClient::from_stream(client_stream).unwrap();
+        assert_eq!(client.negotiated_daemon(), Some((2, "0.2.2")));
+        assert!(matches!(
+            client.passive_diagnostics(),
+            Err(ControlError::CommandRejected(_))
+        ));
+        assert_eq!(client.negotiated_daemon(), Some((2, "0.2.2")));
+        drop(client);
         server.join().unwrap();
     }
 

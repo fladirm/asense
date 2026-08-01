@@ -11,6 +11,8 @@ pub mod hardware;
 pub mod lighting;
 pub mod mutation_lock;
 pub mod nvidia;
+pub(crate) mod passive_diagnostics;
+pub(crate) mod passive_hid;
 pub mod platform;
 pub mod probe;
 pub mod telemetry;

@@ -87,6 +87,7 @@ if [[ -n "$release_tag" ]]; then
     exit 1
   }
 fi
+export ASENSE_BUILD_COMMIT="$commit"
 export LC_ALL=C SOURCE_DATE_EPOCH="$source_date_epoch" TZ=UTC
 # Keep local usernames and checkout paths out of panic/source diagnostics and
 # make release output independent of the builder's HOME and workspace paths.
@@ -124,7 +125,8 @@ install -m 0644 assets/asense.desktop assets/asense.svg "$bundle/assets/"
 install -m 0644 docs/screenshots/asense-compact.png \
   docs/screenshots/asense-advanced.png "$bundle/docs/screenshots/"
 install -m 0644 docs/asense-bitcoin-qr.png docs/asense-paypal-qr.png "$bundle/docs/"
-install -m 0644 docs/RELEASING.md "$bundle/docs/"
+install -m 0644 docs/PROBE_PRIVACY.md docs/PROBE_SCHEMA_V3.md \
+  docs/RELEASING.md "$bundle/docs/"
 install -m 0644 kernel/LICENSE kernel/Makefile kernel/asense_rgb.c kernel/dkms.conf \
   "$bundle/kernel/"
 install -m 0644 packaging/71-asense-hid.rules \

@@ -1,0 +1,108 @@
+{
+  "schema": 3,
+  "provenance": {
+    "report": "asense-probe",
+    "asense_version": "0.3.0",
+    "build_commit": "3333333333333333333333333333333333333333",
+    "captured_at_utc": "2026-08-01T12:15:00Z",
+    "capture_duration_ms": 19,
+    "mode": "passive",
+    "daemon": {
+      "status": "value",
+      "source": "control-socket",
+      "value": { "protocol": 2, "version": "0.3.0" }
+    }
+  },
+  "machine": {
+    "dmi": {
+      "vendor": { "status": "value", "source": "dmi-vendor", "value": "Acer" },
+      "product": { "status": "value", "source": "dmi-product", "value": "Predator Contract Fixture" },
+      "board": { "status": "absent", "source": "dmi-board", "reason": "not-exposed" },
+      "bios": { "status": "value", "source": "dmi-bios", "value": "V0.00" }
+    },
+    "kernel": {
+      "release": { "status": "value", "source": "uname", "value": "7.1.4" },
+      "architecture": { "status": "value", "source": "uname", "value": "x86_64" }
+    },
+    "os": {
+      "id": { "status": "value", "source": "os-release", "value": "test" },
+      "version_id": { "status": "value", "source": "os-release", "value": "1" }
+    }
+  },
+  "power": { "ac": [], "batteries": [] },
+  "drivers": {
+    "modules": [
+      { "name": "acer_wmi", "loaded": { "status": "value", "source": "module-sysfs", "value": true }, "version": { "status": "absent", "source": "module-sysfs", "reason": "not-exposed" } },
+      { "name": "asense_rgb", "loaded": { "status": "value", "source": "module-sysfs", "value": true }, "version": { "status": "value", "source": "module-sysfs", "value": "0.3.0" } }
+    ],
+    "wmi": [
+      {
+        "guid": "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56",
+        "instances": 1,
+        "owner": { "status": "value", "source": "wmi-driver", "value": "asense_rgb" },
+        "groups": ["gaming_profile"]
+      }
+    ],
+    "hwmon_owner": { "status": "absent", "source": "hwmon-driver", "reason": "not-exposed" }
+  },
+  "profile": {
+    "transport": { "status": "present", "source": "gaming-wmi-profile", "backend": "gaming-wmi" },
+    "current": {
+      "status": "error",
+      "source": "gaming-wmi-profile",
+      "error": { "stage": "read", "class": "io", "errno": 5 }
+    },
+    "choices": {
+      "status": "value",
+      "source": "known-gaming-wmi-commands",
+      "value": [
+        { "command": "quiet", "profile": "quiet", "transport_raw": { "encoding": "u8-hex", "bytes": 1, "value": "00" }, "selectable": true },
+        { "command": "balanced", "profile": "balanced", "transport_raw": { "encoding": "u8-hex", "bytes": 1, "value": "01" }, "selectable": true },
+        { "command": "balanced-performance", "profile": "performance", "transport_raw": { "encoding": "u8-hex", "bytes": 1, "value": "04" }, "selectable": true },
+        { "command": "performance", "profile": "turbo", "transport_raw": { "encoding": "u8-hex", "bytes": 1, "value": "05" }, "selectable": true },
+        { "command": "low-power", "profile": "eco", "transport_raw": { "encoding": "u8-hex", "bytes": 1, "value": "06" }, "selectable": true }
+      ]
+    },
+    "firmware_supported_bitmap": { "status": "absent", "source": "gaming-wmi-supported-profiles", "reason": "not-exposed" },
+    "physical_effect": "unverified"
+  },
+  "fans": {
+    "control": { "status": "absent", "source": "fan-discovery", "reason": "not-exposed" },
+    "rpm": [],
+    "pwm": [],
+    "temperatures": []
+  },
+  "platform": {
+    "transport": { "status": "absent", "source": "platform-discovery", "reason": "not-exposed" },
+    "fields": [
+      { "name": "battery-limit", "expected": false, "exposed": false, "source": "asense-battery", "read": { "status": "absent", "source": "asense-battery", "reason": "not-exposed" } },
+      { "name": "battery-calibration", "expected": false, "exposed": false, "source": "asense-battery", "read": { "status": "absent", "source": "asense-battery", "reason": "not-exposed" } },
+      { "name": "usb-off-charging", "expected": false, "exposed": false, "source": "asense-apge", "read": { "status": "absent", "source": "asense-apge", "reason": "not-exposed" } },
+      { "name": "keyboard-timeout", "expected": false, "exposed": false, "source": "asense-apge", "read": { "status": "absent", "source": "asense-apge", "reason": "not-exposed" } },
+      { "name": "boot-sound", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } },
+      { "name": "lcd-override", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } },
+      { "name": "rear-logo", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } }
+    ]
+  },
+  "lighting": [],
+  "hid": [],
+  "privacy": {
+    "automatic_upload": false,
+    "persistent_report_id": false,
+    "default_mutations": [],
+    "extended_mutations": [],
+    "excluded": [
+      "serials", "uuids", "hostname", "user-identity", "network-identity",
+      "boot-id", "storage-identity", "hid-serial-and-physical-path",
+      "journals", "raw-acpi-tables", "absolute-device-paths", "environment"
+    ],
+    "bounded_raw": [
+      { "path": "profile.current.raw", "max_bytes": 48 },
+      { "path": "profile.choices.value[].transport_raw", "max_bytes": 1 },
+      { "path": "profile.firmware_supported_bitmap.value.raw", "max_bytes": 1 },
+      { "path": "platform.fields[].read.error.raw", "max_bytes": 8 },
+      { "path": "hid[].a1.value.payload", "max_bytes": 64 },
+      { "path": "hid[].extended.a3[].read.value.payload", "max_bytes": 64 }
+    ]
+  }
+}

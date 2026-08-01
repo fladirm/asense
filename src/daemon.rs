@@ -24,6 +24,8 @@ use crate::lighting::{
 };
 use crate::mutation_lock::MutationGuard;
 use crate::nvidia::discover_nvidia_pci_device;
+use crate::passive_diagnostics::PassiveDiagnostics;
+use crate::passive_diagnostics::encode as encode_passive_diagnostics;
 use crate::platform::{
     PlatformControls, RearLogoState, UsbCharging, encode_state as encode_platform_state,
 };
@@ -130,27 +132,10 @@ impl CommandDecoder {
 
 pub fn run() -> Result<(), String> {
     ensure_root()?;
-    if let Err(error) = restore_cached_enek_lighting() {
-        eprintln!("asense ENEK lighting restore skipped: {error}");
-    }
     let listener = activated_listener()?;
-    let mut next_nvidia_reconciliation = Instant::now();
+    let mut maintenance = RuntimeMaintenance::new();
     loop {
-        if Path::new(NVIDIA_RESUME_PENDING).exists() && Instant::now() >= next_nvidia_reconciliation
-        {
-            let result = AcerHardware::discover()
-                .map_err(|error| error.to_string())
-                .and_then(|hardware| reconcile_pending_nvidia(&hardware));
-            next_nvidia_reconciliation = Instant::now()
-                + if result.is_ok() {
-                    NVIDIA_RECONCILE_POLL
-                } else {
-                    NVIDIA_RECONCILE_RETRY
-                };
-            if let Err(error) = result {
-                eprintln!("asense deferred NVIDIA reconciliation warning: {error}");
-            }
-        }
+        maintenance.poll_with_discovery();
         let mut ready = libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,
@@ -172,8 +157,71 @@ pub fn run() -> Result<(), String> {
         let (stream, _) = listener
             .accept()
             .map_err(|error| format!("accept failed: {error}"))?;
-        if let Err(error) = serve_client(stream) {
+        if let Err(error) = serve_client(stream, &mut maintenance) {
             eprintln!("asense daemon client error: {error}");
+        }
+    }
+}
+
+/// Runtime maintenance is lazy so a socket activation caused solely by the
+/// schema-3 passive probe cannot restore ENEK state or reconcile NVIDIA. The
+/// first ordinary GUI/control command activates the historical behavior once;
+/// subsequent global and per-client polling remains unchanged.
+struct RuntimeMaintenance {
+    active: bool,
+    next_nvidia_reconciliation: Instant,
+}
+
+impl RuntimeMaintenance {
+    fn new() -> Self {
+        Self {
+            active: false,
+            next_nvidia_reconciliation: Instant::now(),
+        }
+    }
+
+    fn activate(&mut self) {
+        if self.active {
+            return;
+        }
+        self.active = true;
+        if let Err(error) = restore_cached_enek_lighting() {
+            eprintln!("asense ENEK lighting restore skipped: {error}");
+        }
+    }
+
+    fn poll_with_discovery(&mut self) {
+        if !self.active
+            || !Path::new(NVIDIA_RESUME_PENDING).exists()
+            || Instant::now() < self.next_nvidia_reconciliation
+        {
+            return;
+        }
+        let result = AcerHardware::discover()
+            .map_err(|error| error.to_string())
+            .and_then(|hardware| reconcile_pending_nvidia(&hardware));
+        self.record_reconciliation(result);
+    }
+
+    fn poll_with(&mut self, hardware: &AcerHardware) {
+        if !self.active
+            || !Path::new(NVIDIA_RESUME_PENDING).exists()
+            || Instant::now() < self.next_nvidia_reconciliation
+        {
+            return;
+        }
+        self.record_reconciliation(reconcile_pending_nvidia(hardware));
+    }
+
+    fn record_reconciliation(&mut self, result: Result<(), String>) {
+        self.next_nvidia_reconciliation = Instant::now()
+            + if result.is_ok() {
+                NVIDIA_RECONCILE_POLL
+            } else {
+                NVIDIA_RECONCILE_RETRY
+            };
+        if let Err(error) = result {
+            eprintln!("asense deferred NVIDIA reconciliation warning: {error}");
         }
     }
 }
@@ -428,7 +476,10 @@ fn activated_listener() -> Result<UnixListener, String> {
     Ok(unsafe { UnixListener::from_raw_fd(3) })
 }
 
-fn serve_client(mut stream: UnixStream) -> Result<(), String> {
+fn serve_client(
+    mut stream: UnixStream,
+    maintenance: &mut RuntimeMaintenance,
+) -> Result<(), String> {
     authorize_peer(&stream)?;
     let mut hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
     stream
@@ -439,15 +490,12 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
     let mut decoder = CommandDecoder::new();
     let mut protocol = ProtocolSession::new();
     let mut fan_session = FanSessionState::Automatic;
-    let mut next_nvidia_reconciliation = Instant::now();
+    let mut session_maintenance_active = false;
 
     let result = (|| -> Result<(), String> {
         loop {
-            if Instant::now() >= next_nvidia_reconciliation
-                && let Err(error) = reconcile_pending_nvidia(&hardware)
-            {
-                eprintln!("asense deferred NVIDIA reconciliation warning: {error}");
-                next_nvidia_reconciliation = Instant::now() + NVIDIA_RECONCILE_RETRY;
+            if session_maintenance_active {
+                maintenance.poll_with(&hardware);
             }
             enforce_thermal_watchdog(&mut hardware, &mut fan_session)?;
             let command = match decoder.read(&mut reader) {
@@ -482,6 +530,12 @@ fn serve_client(mut stream: UnixStream) -> Result<(), String> {
                     break Ok(());
                 }
                 ProtocolAction::Dispatch => {}
+            }
+            let fields = command.split_ascii_whitespace().collect::<Vec<_>>();
+            if command_activates_runtime_maintenance(&fields) {
+                session_maintenance_active = true;
+                maintenance.activate();
+                maintenance.poll_with(&hardware);
             }
             let command_result = execute_command(&mut hardware, command, &mut fan_session);
             let command_succeeded = command_result.is_ok();
@@ -637,6 +691,10 @@ fn execute_command(
         .transpose()?;
     match fields.as_slice() {
         ["PING"] => Ok("ready".to_string()),
+        ["DIAG", "PASSIVE"] => {
+            let diagnostics = PassiveDiagnostics::collect();
+            encode_passive_diagnostics(&diagnostics)
+        }
         ["CAPS"] => {
             let refreshed = AcerHardware::discover().map_err(|error| error.to_string())?;
             let capabilities = collect_control_capabilities(&refreshed)?;
@@ -988,6 +1046,10 @@ fn command_is_mutation(fields: &[&str]) -> bool {
     }
 }
 
+fn command_activates_runtime_maintenance(fields: &[&str]) -> bool {
+    !matches!(fields, ["DIAG", "PASSIVE"])
+}
+
 fn parse_lighting_mode(value: &str) -> Result<LightingMode, String> {
     match value {
         "OFF" => Ok(LightingMode::Off),
@@ -1140,7 +1202,8 @@ fn ensure_root() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandDecoder, FanSessionState, ProtocolAction, ProtocolSession, command_is_mutation,
+        CommandDecoder, FanSessionState, ProtocolAction, ProtocolSession,
+        command_activates_runtime_maintenance, command_is_mutation,
         finish_pending_nvidia_reconciliation, load_cached_lighting, parse_color,
         parse_lighting_mode, parse_manual_percent, parse_on_off, parse_zone_colors,
         preserve_verified_profile_after_fan_refresh, protocol_handshake,
@@ -1455,6 +1518,7 @@ mod tests {
     #[test]
     fn mutation_lock_classification_is_fail_closed_for_control_writes() {
         assert!(!command_is_mutation(&["PING"]));
+        assert!(!command_is_mutation(&["DIAG", "PASSIVE"]));
         assert!(!command_is_mutation(&["RGB", "GET"]));
         assert!(!command_is_mutation(&["PLATFORM", "GET"]));
         assert!(command_is_mutation(&["FAN", "AUTO"]));
@@ -1468,6 +1532,16 @@ mod tests {
             "OFF"
         ]));
         assert!(command_is_mutation(&["PLATFORM", "BATTERY_LIMIT", "ON"]));
+    }
+
+    #[test]
+    fn passive_diagnostic_does_not_activate_runtime_maintenance() {
+        assert!(!command_activates_runtime_maintenance(&["DIAG", "PASSIVE"]));
+        assert!(command_activates_runtime_maintenance(&["CAPS"]));
+        assert!(command_activates_runtime_maintenance(&["PING"]));
+        assert!(command_activates_runtime_maintenance(&[
+            "PROFILE", "balanced"
+        ]));
     }
 
     #[test]

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command in base64 bash cargo cmp desktop-file-validate find grep install make mktemp rustup sed sh sort systemd-analyze systemd-hwdb tr udevadm; do
+for command in base64 bash cargo cmp desktop-file-validate find grep head install make mktemp rustup sed sh sort systemd-analyze systemd-hwdb tr udevadm; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'asense-verify: missing command: %s\n' "$command" >&2
     exit 1
@@ -55,6 +55,33 @@ run() {
 }
 
 run "${cargo_command[@]}" fmt --all -- --check
+
+printf '\n==> release version authorities\n'
+version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+lock_version="$(sed -n '/^name = "asense"$/{n;s/^version = "\([^"]*\)"$/\1/p;q}' Cargo.lock)"
+dkms_version="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"$/\1/p' kernel/dkms.conf)"
+module_version="$(sed -n 's/^MODULE_VERSION("\([^"]*\)");$/\1/p' kernel/asense_rgb.c)"
+[[ -n "$version" && "$lock_version" == "$version" && "$dkms_version" == "$version" \
+  && "$module_version" == "$version" ]] || {
+  printf 'asense-verify: Cargo/lock/DKMS/module versions differ: %s %s %s %s\n' \
+    "$version" "$lock_version" "$dkms_version" "$module_version" >&2
+  exit 1
+}
+for source in kernel/asense_rgb.c kernel/Makefile kernel/LICENSE; do
+  grep --fixed-strings --line-regexp \
+    "$source usr/src/asense-rgb-$version" debian/asense.install >/dev/null
+done
+grep --fixed-strings --line-regexp "docs/RELEASE_NOTES_v$version.md" \
+  debian/asense.docs >/dev/null
+[[ -f "docs/RELEASE_NOTES_v$version.md" ]] || {
+  printf 'asense-verify: release notes are absent for %s\n' "$version" >&2
+  exit 1
+}
+grep --fixed-strings "ASense $version" debian/asense.1 >/dev/null
+grep --fixed-strings "ASense $version" debian/asense-configure-user.8 >/dev/null
+grep --fixed-strings "<release version=\"$version\"" \
+  debian/io.github.fladirm.asense.metainfo.xml >/dev/null
+
 run "${cargo_command[@]}" test --locked --all-targets --all-features
 run "${cargo_command[@]}" test --locked --test kernel_rgb_protocol
 run "${cargo_command[@]}" clippy --locked --all-targets --all-features -- -D warnings

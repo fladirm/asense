@@ -217,17 +217,23 @@ Create a local read-only report for a GitHub issue with:
 
 ```bash
 asense probe > asense-probe.json
+asense probe --summary
 ```
 
 Close the ASense window first so the one-shot probe can use the daemon's
-single control session.
+single control session. The first command creates the authoritative schema-3
+JSON attachment. The second prints a compact human-readable view of a fresh
+capture; it does not replace the JSON evidence.
 
 The report contains model, profile, fan, known WMI and known HID capability
-data. It sends only `HELLO` and `CAPS` to the local daemon so typed ENEK5130
-zones and modes can be included when available; it sends no setter and falls
-back to passive HID inspection when the daemon is unavailable. It omits serial
-numbers, UUID, hostname, user and network identifiers, journals and raw ACPI
-tables. Review it before sharing.
+data. It sends `HELLO 2` followed by the fixed read-only `DIAG PASSIVE` request
+to the local daemon. It does not call general capability discovery, send an
+ENEK target selector or invoke a setter. It performs no upload. The JSON omits
+serials, UUIDs, hostname, user and network identity, boot and storage identity,
+HID serial/physical paths, journals, raw ACPI tables, absolute device paths and
+the process environment. Review it before sharing; the exact collection,
+privacy and support-state contract is documented in
+[Probe privacy and support workflow](docs/PROBE_PRIVACY.md).
 
 Uninstall with the copy retained by the installer:
 

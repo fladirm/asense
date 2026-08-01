@@ -33,6 +33,14 @@ jobs:
             --profile minimal --component clippy,rustfmt
           rustup default 1.96.0
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
       - name: Verify release candidate
         run: scripts/verify-release.sh
 
@@ -45,23 +53,29 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: asense-v0.2.2-rc-${{ github.sha }}
+          name: asense-v${{ steps.version.outputs.version }}-rc-${{ github.sha }}
           retention-days: 7
           if-no-files-found: error
           path: |
-            asense-v0.2.2-*.zip
-            asense-v0.2.2-*.zip.sha256
+            asense-v${{ steps.version.outputs.version }}-*.zip
+            asense-v${{ steps.version.outputs.version }}-*.zip.sha256
             SHA256SUMS
 
       - name: Publish GitHub Release assets
         if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          ASENSE_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          release_flags=()
+          if [[ "$ASENSE_VERSION" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
-            --title "ASense v0.2.2 — Telemetry stability hotfix" \
-            --notes-file docs/RELEASE_NOTES_v0.2.2.md \
-            asense-v0.2.2-*.zip \
-            asense-v0.2.2-*.zip.sha256 \
+            "${release_flags[@]}" \
+            --title "ASense v${ASENSE_VERSION}" \
+            --notes-file "docs/RELEASE_NOTES_v${ASENSE_VERSION}.md" \
+            asense-v"${ASENSE_VERSION}"-*.zip \
+            asense-v"${ASENSE_VERSION}"-*.zip.sha256 \
             SHA256SUMS

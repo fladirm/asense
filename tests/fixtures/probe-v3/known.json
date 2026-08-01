@@ -1,0 +1,179 @@
+{
+  "schema": 3,
+  "provenance": {
+    "report": "asense-probe",
+    "asense_version": "0.3.0",
+    "build_commit": "1111111111111111111111111111111111111111",
+    "captured_at_utc": "2026-08-01T12:00:00Z",
+    "capture_duration_ms": 37,
+    "mode": "passive",
+    "daemon": {
+      "status": "value",
+      "source": "control-socket",
+      "value": { "protocol": 2, "version": "0.3.0" }
+    }
+  },
+  "machine": {
+    "dmi": {
+      "vendor": { "status": "value", "source": "dmi-vendor", "value": "Acer" },
+      "product": { "status": "value", "source": "dmi-product", "value": "Predator PHN16-72" },
+      "board": { "status": "value", "source": "dmi-board", "value": "EQE_RTX" },
+      "bios": { "status": "value", "source": "dmi-bios", "value": "V1.18" }
+    },
+    "kernel": {
+      "release": { "status": "value", "source": "uname", "value": "7.1.3-070103-generic" },
+      "architecture": { "status": "value", "source": "uname", "value": "x86_64" }
+    },
+    "os": {
+      "id": { "status": "value", "source": "os-release", "value": "ubuntu" },
+      "version_id": { "status": "value", "source": "os-release", "value": "26.04" }
+    }
+  },
+  "power": {
+    "ac": [
+      {
+        "ordinal": 0,
+        "kind": "mains",
+        "online": { "status": "value", "source": "power-supply", "value": true }
+      }
+    ],
+    "batteries": [
+      {
+        "ordinal": 0,
+        "present": { "status": "value", "source": "power-supply", "value": true },
+        "status": { "status": "value", "source": "power-supply", "value": "charging" },
+        "capacity_percent": { "status": "value", "source": "power-supply", "value": 80 }
+      }
+    ]
+  },
+  "drivers": {
+    "modules": [
+      {
+        "name": "acer_wmi",
+        "loaded": { "status": "value", "source": "module-sysfs", "value": true },
+        "version": { "status": "absent", "source": "module-sysfs", "reason": "not-exposed" }
+      },
+      {
+        "name": "asense_rgb",
+        "loaded": { "status": "value", "source": "module-sysfs", "value": true },
+        "version": { "status": "value", "source": "module-sysfs", "value": "0.3.0" }
+      }
+    ],
+    "wmi": [
+      {
+        "guid": "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56",
+        "instances": 1,
+        "owner": { "status": "value", "source": "wmi-driver", "value": "asense_rgb" },
+        "groups": ["asense_rgb", "rgb_zoned"]
+      },
+      {
+        "guid": "79772EC5-04B1-4BFD-843C-61E7F77B6CC9",
+        "instances": 1,
+        "owner": { "status": "value", "source": "wmi-driver", "value": "asense_rgb" },
+        "groups": ["asense_battery"]
+      },
+      {
+        "guid": "61EF69EA-865C-4BC3-A502-A0DEBA0CB531",
+        "instances": 1,
+        "owner": { "status": "value", "source": "wmi-driver", "value": "asense_rgb" },
+        "groups": ["asense_apge"]
+      }
+    ],
+    "hwmon_owner": { "status": "value", "source": "hwmon-driver", "value": "asense_rgb" }
+  },
+  "profile": {
+    "transport": { "status": "present", "source": "kernel-platform-profile", "backend": "kernel" },
+    "current": {
+      "status": "known",
+      "source": "kernel-platform-profile",
+      "raw": { "encoding": "ascii-token", "bytes": 8, "value": "balanced" },
+      "profile": "balanced"
+    },
+    "choices": {
+      "status": "value",
+      "source": "kernel-platform-profile",
+      "value": [
+        { "command": "low-power", "profile": "eco", "transport_raw": null, "selectable": true },
+        { "command": "quiet", "profile": "quiet", "transport_raw": null, "selectable": true },
+        { "command": "balanced", "profile": "balanced", "transport_raw": null, "selectable": true },
+        { "command": "balanced-performance", "profile": "performance", "transport_raw": null, "selectable": true },
+        { "command": "performance", "profile": "turbo", "transport_raw": null, "selectable": true }
+      ]
+    },
+    "firmware_supported_bitmap": { "status": "absent", "source": "gaming-wmi-supported-profiles", "reason": "not-exposed" },
+    "physical_effect": "unverified"
+  },
+  "fans": {
+    "control": {
+      "status": "present",
+      "source": "acer-hwmon",
+      "backend": "kernel-pwm",
+      "modes": { "auto": true, "manual": true, "maximum": true }
+    },
+    "rpm": [
+      { "channel": 1, "label": "CPU", "read": { "status": "value", "source": "acer-hwmon", "value": 3200 } },
+      { "channel": 2, "label": "GPU", "read": { "status": "value", "source": "acer-hwmon", "value": 2900 } }
+    ],
+    "pwm": [
+      {
+        "channel": 1,
+        "setpoint_unit": "pwm255",
+        "setpoint": { "status": "value", "source": "acer-hwmon", "value": 127 },
+        "mode": { "status": "value", "source": "acer-hwmon", "value": "auto" }
+      },
+      {
+        "channel": 2,
+        "setpoint_unit": "pwm255",
+        "setpoint": { "status": "value", "source": "acer-hwmon", "value": 127 },
+        "mode": { "status": "value", "source": "acer-hwmon", "value": "auto" }
+      }
+    ],
+    "temperatures": [
+      { "channel": 1, "label": "CPU", "millidegrees_c": { "status": "value", "source": "acer-hwmon", "value": 52000 } },
+      { "channel": 2, "label": "GPU", "millidegrees_c": { "status": "value", "source": "acer-hwmon", "value": 47000 } }
+    ]
+  },
+  "platform": {
+    "transport": { "status": "present", "source": "asense-rgb", "backend": "gaming-wmi" },
+    "fields": [
+      { "name": "battery-limit", "expected": true, "exposed": true, "source": "asense-battery", "read": { "status": "value", "source": "asense-battery", "value": { "type": "bool", "value": true } } },
+      { "name": "battery-calibration", "expected": true, "exposed": true, "source": "asense-battery", "read": { "status": "value", "source": "asense-battery", "value": { "type": "bool", "value": false } } },
+      { "name": "usb-off-charging", "expected": true, "exposed": true, "source": "asense-apge", "read": { "status": "value", "source": "asense-apge", "value": { "type": "usb-threshold", "value": 20 } } },
+      { "name": "keyboard-timeout", "expected": true, "exposed": true, "source": "asense-apge", "read": { "status": "value", "source": "asense-apge", "value": { "type": "bool", "value": true } } },
+      { "name": "boot-sound", "expected": false, "exposed": false, "source": "asense-rgb", "read": { "status": "absent", "source": "asense-rgb", "reason": "not-exposed" } },
+      { "name": "lcd-override", "expected": true, "exposed": true, "source": "asense-rgb", "read": { "status": "value", "source": "asense-rgb", "value": { "type": "bool", "value": false } } },
+      { "name": "rear-logo", "expected": true, "exposed": true, "source": "asense-rgb", "read": { "status": "value", "source": "asense-rgb", "value": { "type": "rear-logo", "enabled": true, "brightness": 50, "color": "ff0000" } } }
+    ]
+  },
+  "lighting": [
+    {
+      "id": "zoned-wmi-keyboard",
+      "backend": "zoned-wmi",
+      "target": "keyboard",
+      "zones": 4,
+      "modes": { "static_color": true, "brightness": true, "breathing": true, "neon": true },
+      "state_readable": true,
+      "authority": "transport-capability"
+    }
+  ],
+  "hid": [],
+  "privacy": {
+    "automatic_upload": false,
+    "persistent_report_id": false,
+    "default_mutations": [],
+    "extended_mutations": [],
+    "excluded": [
+      "serials", "uuids", "hostname", "user-identity", "network-identity",
+      "boot-id", "storage-identity", "hid-serial-and-physical-path",
+      "journals", "raw-acpi-tables", "absolute-device-paths", "environment"
+    ],
+    "bounded_raw": [
+      { "path": "profile.current.raw", "max_bytes": 48 },
+      { "path": "profile.choices.value[].transport_raw", "max_bytes": 1 },
+      { "path": "profile.firmware_supported_bitmap.value.raw", "max_bytes": 1 },
+      { "path": "platform.fields[].read.error.raw", "max_bytes": 8 },
+      { "path": "hid[].a1.value.payload", "max_bytes": 64 },
+      { "path": "hid[].extended.a3[].read.value.payload", "max_bytes": 64 }
+    ]
+  }
+}

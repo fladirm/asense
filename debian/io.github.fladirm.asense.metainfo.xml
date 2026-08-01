@@ -45,6 +45,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.0-rc.1" date="2026-08-01" type="development">
+      <description>
+        <p>
+          Adds a bounded passive schema-3 compatibility probe, exact
+          source/error evidence and a synchronized privacy/support workflow.
+          This diagnostic candidate does not add unverified hardware controls.
+        </p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-07-20">
       <url>https://github.com/fladirm/asense/releases/tag/v0.2.2</url>
       <description>

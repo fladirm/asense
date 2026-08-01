@@ -1,3 +1,13 @@
+asense (0.3.0~rc1-1~local1) resolute; urgency=medium
+
+  * Add the bounded, read-only schema-3 compatibility probe with typed source,
+    absence, unknown-value and failure evidence.
+  * Add passive profile, fan, platform, zoned-WMI and exact HID geometry
+    diagnostics without exposing a generic firmware command surface.
+  * Add a compact probe summary and synchronized privacy/support workflow.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Sat, 01 Aug 2026 23:30:00 +0200
+
 asense (0.2.2-1~ppa1~resolute1) resolute; urgency=medium
 
   * Keep one NVML session for each live dGPU epoch instead of repeatedly

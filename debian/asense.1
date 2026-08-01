@@ -1,9 +1,13 @@
-.TH ASENSE 1 "20 July 2026" "ASense 0.2.2" "User Commands"
+.TH ASENSE 1 "1 August 2026" "ASense 0.3.0-rc.1" "User Commands"
 .SH NAME
 asense \- Acer laptop control center
 .SH SYNOPSIS
 .B asense
 .RI [ option ]
+.br
+.B asense
+.B probe
+.RI [ --summary ]
 .SH DESCRIPTION
 .B ASense
 is a graphical Linux control center for supported Acer Predator and Nitro
@@ -15,11 +19,24 @@ panel.
 .SH OPTIONS
 .TP
 .B probe, --probe
-Print a local, read-only JSON capability report to standard output.  The
-report omits serial numbers, UUIDs, account names and network identifiers.
+Print the authoritative local, read-only schema-3 JSON capability report to
+standard output.  Redirect it with
+.BR "asense probe > asense-probe.json" .
+The probe performs no upload or default mutation.
+.TP
+.B probe --summary, --probe --summary
+Print a bounded human-readable view of a fresh schema-3 capture.  This is for
+quick inspection and does not replace the JSON attachment in a support report.
 .TP
 .B --toggle
 Open ASense when it is closed, or close the existing ASense window.
+.SH PROBE PRIVACY
+The default probe excludes serials, UUIDs, hostname, user, network, boot and
+storage identity, HID serials and physical paths, journals, raw ACPI tables,
+absolute device paths and the process environment.  It reports bounded model,
+kernel, power, driver and known WMI/HID transport evidence.  Review the JSON
+before sharing it.  Capture observed behavior and the report with the same
+ASense build, boot and loaded-module state.
 .SH FILES
 .TP
 .I /etc/asense/desktop-user

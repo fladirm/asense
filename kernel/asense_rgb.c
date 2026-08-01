@@ -149,6 +149,7 @@ struct asense_zoned_quirk {
 
 struct asense_rgb {
 	struct wmi_device *wdev;
+	enum asense_endpoint_type endpoint_type;
 	/* Serializes firmware transactions and the resume cache. */
 	struct mutex lock;
 	struct asense_effect cached_effect;
@@ -614,15 +615,21 @@ static void asense_select_zone_config(struct asense_rgb *rgb)
 	}
 }
 
+static int asense_read_battery_raw(struct asense_rgb *rgb, u8 result[8])
+{
+	u8 input[4] = { 1, 1, 0, 0 };
+
+	return asense_endpoint_wmi_call(rgb, ASENSE_BATTERY_GET, input,
+					sizeof(input), result, 8);
+}
+
 static int asense_read_battery(struct asense_rgb *rgb,
 			       struct asense_battery_state *state)
 {
-	u8 input[4] = { 1, 1, 0, 0 };
 	u8 result[8];
 	int error;
 
-	error = asense_endpoint_wmi_call(rgb, ASENSE_BATTERY_GET, input,
-					 sizeof(input), result, sizeof(result));
+	error = asense_read_battery_raw(rgb, result);
 	if (error)
 		return error;
 	/*
@@ -662,6 +669,12 @@ static bool asense_usb_threshold_valid(u8 threshold)
 	return threshold == 10 || threshold == 20 || threshold == 30;
 }
 
+static int asense_read_usb_raw(struct asense_rgb *rgb, u64 *result)
+{
+	return asense_scalar_call(rgb, ASENSE_FUNCTION_GET,
+				  ASENSE_USB_GET, result);
+}
+
 static int asense_read_usb(struct asense_rgb *rgb,
 			   struct asense_usb_state *state)
 {
@@ -669,8 +682,7 @@ static int asense_read_usb(struct asense_rgb *rgb,
 	u8 mode;
 	int error;
 
-	error = asense_scalar_call(rgb, ASENSE_FUNCTION_GET,
-				   ASENSE_USB_GET, &result);
+	error = asense_read_usb_raw(rgb, &result);
 	if (error)
 		return error;
 	if (FIELD_GET(ASENSE_USB_STATUS_MASK, result))
@@ -700,13 +712,18 @@ static int asense_write_usb(struct asense_rgb *rgb,
 	return asense_scalar_set(rgb, ASENSE_FUNCTION_SET, payload);
 }
 
+static int asense_read_timeout_raw(struct asense_rgb *rgb, u64 *result)
+{
+	return asense_scalar_call(rgb, ASENSE_FUNCTION_GET,
+				  ASENSE_TIMEOUT_GET, result);
+}
+
 static int asense_read_timeout(struct asense_rgb *rgb, bool *enabled)
 {
 	u64 result;
 	int error;
 
-	error = asense_scalar_call(rgb, ASENSE_FUNCTION_GET,
-				   ASENSE_TIMEOUT_GET, &result);
+	error = asense_read_timeout_raw(rgb, &result);
 	if (error)
 		return error;
 	/* V1.18 returns zero until the setting has first been initialized. */
@@ -727,13 +744,18 @@ static int asense_write_timeout(struct asense_rgb *rgb, bool enabled)
 				 ASENSE_TIMEOUT_SET_OFF);
 }
 
+static int asense_read_boot_sound_raw(struct asense_rgb *rgb, u64 *result)
+{
+	return asense_scalar_call(rgb, ASENSE_MISC_GET,
+				  ASENSE_BOOT_SOUND_SELECTOR, result);
+}
+
 static int asense_read_boot_sound(struct asense_rgb *rgb, bool *enabled)
 {
 	u64 result;
 	int error;
 
-	error = asense_scalar_call(rgb, ASENSE_MISC_GET,
-				   ASENSE_BOOT_SOUND_SELECTOR, &result);
+	error = asense_read_boot_sound_raw(rgb, &result);
 	if (error)
 		return error;
 	if (result == ASENSE_BOOT_SOUND_OFF)
@@ -752,13 +774,18 @@ static int asense_write_boot_sound(struct asense_rgb *rgb, bool enabled)
 				 ASENSE_BOOT_SOUND_SET_OFF);
 }
 
+static int asense_read_lcd_raw(struct asense_rgb *rgb, u64 *result)
+{
+	return asense_scalar_call(rgb, ASENSE_PROFILE_GET,
+				  ASENSE_LCD_SELECTOR, result);
+}
+
 static int asense_read_lcd(struct asense_rgb *rgb, bool *enabled)
 {
 	u64 result;
 	int error;
 
-	error = asense_scalar_call(rgb, ASENSE_PROFILE_GET,
-				   ASENSE_LCD_SELECTOR, &result);
+	error = asense_read_lcd_raw(rgb, &result);
 	if (error)
 		return error;
 	/*
@@ -778,14 +805,20 @@ static int asense_write_lcd(struct asense_rgb *rgb, bool enabled)
 				 enabled ? ASENSE_LCD_SET_ON : ASENSE_LCD_SET_OFF);
 }
 
-static int asense_read_logo(struct asense_rgb *rgb, struct asense_logo *logo)
+static int asense_read_logo_raw(struct asense_rgb *rgb, u8 result[8])
 {
 	u64 selector = 1;
+
+	return asense_wmi_call(rgb, ASENSE_LOGO_GET, &selector,
+			       sizeof(selector), result, 8);
+}
+
+static int asense_read_logo(struct asense_rgb *rgb, struct asense_logo *logo)
+{
 	u8 result[8];
 	int error;
 
-	error = asense_wmi_call(rgb, ASENSE_LOGO_GET, &selector,
-				sizeof(selector), result, sizeof(result));
+	error = asense_read_logo_raw(rgb, result);
 	if (error)
 		return error;
 	if (result[0] != 0 || result[4] > 100 || result[5] > 1)
@@ -1853,6 +1886,104 @@ static ssize_t choices_show(struct device *dev, struct device_attribute *attr,
 		"low-power quiet balanced balanced-performance performance\n");
 }
 
+/*
+ * Fixed read-only diagnostic attributes.  They expose only the bounded
+ * results of the driver's already typed Acer operations; there is no method,
+ * selector or payload input.  Userspace uses these reads to distinguish an
+ * unknown firmware value from an absent transport without enabling a write.
+ */
+static ssize_t profile_raw_show(struct device *dev,
+				struct device_attribute *attr, char *buffer)
+{
+	struct asense_rgb *rgb = dev_get_drvdata(dev);
+	u8 value;
+	int error;
+
+	mutex_lock(&rgb->lock);
+	error = asense_read_profile(rgb, &value);
+	mutex_unlock(&rgb->lock);
+	return error ? error : sysfs_emit(buffer, "%02x\n", value);
+}
+
+static ssize_t diagnostic_cpu_mode_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buffer)
+{
+	return asense_fan_mode_show(dev, ASENSE_FAN_BEHAVIOR_CPU, buffer);
+}
+
+static ssize_t diagnostic_gpu_mode_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buffer)
+{
+	return asense_fan_mode_show(dev, ASENSE_FAN_BEHAVIOR_GPU, buffer);
+}
+
+static ssize_t diagnostic_cpu_speed_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buffer)
+{
+	return asense_fan_speed_show(dev, ASENSE_CPU_FAN_ID, buffer);
+}
+
+static ssize_t diagnostic_gpu_speed_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buffer)
+{
+	return asense_fan_speed_show(dev, ASENSE_GPU_FAN_ID, buffer);
+}
+
+static ssize_t battery_raw_show(struct device *dev,
+				struct device_attribute *attr, char *buffer)
+{
+	struct asense_rgb *rgb = dev_get_drvdata(dev);
+	u8 value[8];
+	int error;
+
+	mutex_lock(&rgb->lock);
+	error = asense_read_battery_raw(rgb, value);
+	mutex_unlock(&rgb->lock);
+	return error ? error : sysfs_emit(buffer,
+		"%02x%02x%02x%02x%02x%02x%02x%02x\n",
+		value[0], value[1], value[2], value[3],
+		value[4], value[5], value[6], value[7]);
+}
+
+#define ASENSE_DIAGNOSTIC_SCALAR_ATTRIBUTE(_name, _read) \
+static ssize_t _name##_show(struct device *dev, \
+			    struct device_attribute *attr, char *buffer) \
+{ \
+	struct asense_rgb *rgb = dev_get_drvdata(dev); \
+	u64 value; \
+	int error; \
+	mutex_lock(&rgb->lock); \
+	error = _read(rgb, &value); \
+	mutex_unlock(&rgb->lock); \
+	return error ? error : sysfs_emit(buffer, "%016llx\n", \
+					   (unsigned long long)value); \
+}
+
+ASENSE_DIAGNOSTIC_SCALAR_ATTRIBUTE(usb_raw, asense_read_usb_raw)
+ASENSE_DIAGNOSTIC_SCALAR_ATTRIBUTE(timeout_raw, asense_read_timeout_raw)
+ASENSE_DIAGNOSTIC_SCALAR_ATTRIBUTE(boot_sound_raw, asense_read_boot_sound_raw)
+ASENSE_DIAGNOSTIC_SCALAR_ATTRIBUTE(lcd_raw, asense_read_lcd_raw)
+
+static ssize_t rear_logo_raw_show(struct device *dev,
+				  struct device_attribute *attr, char *buffer)
+{
+	struct asense_rgb *rgb = dev_get_drvdata(dev);
+	u8 value[8];
+	int error;
+
+	mutex_lock(&rgb->lock);
+	error = asense_read_logo_raw(rgb, value);
+	mutex_unlock(&rgb->lock);
+	return error ? error : sysfs_emit(buffer,
+		"%02x%02x%02x%02x%02x%02x%02x%02x\n",
+		value[0], value[1], value[2], value[3],
+		value[4], value[5], value[6], value[7]);
+}
+
 static int asense_rgb_suspend(struct device *dev)
 {
 	struct asense_rgb *rgb = dev_get_drvdata(dev);
@@ -1923,6 +2054,17 @@ static DEVICE_ATTR_ADMIN_RW(cpu_speed);
 static DEVICE_ATTR_ADMIN_RW(gpu_speed);
 static DEVICE_ATTR_ADMIN_RW(profile);
 static DEVICE_ATTR_RO(choices);
+static DEVICE_ATTR_ADMIN_RO(profile_raw);
+static DEVICE_ATTR_ADMIN_RO(diagnostic_cpu_mode);
+static DEVICE_ATTR_ADMIN_RO(diagnostic_gpu_mode);
+static DEVICE_ATTR_ADMIN_RO(diagnostic_cpu_speed);
+static DEVICE_ATTR_ADMIN_RO(diagnostic_gpu_speed);
+static DEVICE_ATTR_ADMIN_RO(battery_raw);
+static DEVICE_ATTR_ADMIN_RO(usb_raw);
+static DEVICE_ATTR_ADMIN_RO(timeout_raw);
+static DEVICE_ATTR_ADMIN_RO(boot_sound_raw);
+static DEVICE_ATTR_ADMIN_RO(lcd_raw);
+static DEVICE_ATTR_ADMIN_RO(rear_logo_raw);
 
 static struct attribute *asense_rgb_attributes[] = {
 	&dev_attr_effect.attr,
@@ -2065,6 +2207,61 @@ static const struct attribute_group asense_apge_group = {
 	.is_visible = asense_apge_is_visible,
 };
 
+static struct attribute *asense_diagnostic_attributes[] = {
+	&dev_attr_profile_raw.attr,
+	&dev_attr_diagnostic_cpu_mode.attr,
+	&dev_attr_diagnostic_gpu_mode.attr,
+	&dev_attr_diagnostic_cpu_speed.attr,
+	&dev_attr_diagnostic_gpu_speed.attr,
+	&dev_attr_battery_raw.attr,
+	&dev_attr_usb_raw.attr,
+	&dev_attr_timeout_raw.attr,
+	&dev_attr_boot_sound_raw.attr,
+	&dev_attr_lcd_raw.attr,
+	&dev_attr_rear_logo_raw.attr,
+	NULL,
+};
+
+static umode_t asense_diagnostic_is_visible(struct kobject *kobject,
+					    struct attribute *attribute,
+					    int index)
+{
+	struct device *dev = kobj_to_dev(kobject);
+	struct asense_rgb *rgb = dev_get_drvdata(dev);
+
+	switch (rgb->endpoint_type) {
+	case ASENSE_ENDPOINT_GAMING:
+		if (attribute == &dev_attr_profile_raw.attr ||
+		    attribute == &dev_attr_diagnostic_cpu_mode.attr ||
+		    attribute == &dev_attr_diagnostic_gpu_mode.attr ||
+		    attribute == &dev_attr_diagnostic_cpu_speed.attr ||
+		    attribute == &dev_attr_diagnostic_gpu_speed.attr ||
+		    attribute == &dev_attr_boot_sound_raw.attr ||
+		    attribute == &dev_attr_lcd_raw.attr ||
+		    attribute == &dev_attr_rear_logo_raw.attr)
+			return attribute->mode;
+		break;
+	case ASENSE_ENDPOINT_BATTERY:
+		if (attribute == &dev_attr_battery_raw.attr)
+			return attribute->mode;
+		break;
+	case ASENSE_ENDPOINT_APGE:
+		if (attribute == &dev_attr_usb_raw.attr ||
+		    attribute == &dev_attr_timeout_raw.attr)
+			return attribute->mode;
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static const struct attribute_group asense_diagnostic_group = {
+	.name = "asense_diagnostics",
+	.attrs = asense_diagnostic_attributes,
+	.is_visible = asense_diagnostic_is_visible,
+};
+
 static bool asense_reference_model(void)
 {
 	return dmi_match(DMI_PRODUCT_NAME, "Predator PHN16-72");
@@ -2122,7 +2319,7 @@ static int asense_probe_gaming(struct asense_rgb *rgb)
 	if (!rgb->rgb_available && !rgb->fan_behavior_available &&
 	    !rgb->profile_available && !rgb->boot_sound_available &&
 	    !rgb->lcd_available && !rgb->logo_available)
-		return -ENODEV;
+		return 0;
 	if (rgb->rgb_available || rgb->boot_sound_available ||
 	    rgb->lcd_available || rgb->logo_available) {
 		error = devm_device_add_group(&rgb->wdev->dev, &asense_rgb_group);
@@ -2149,7 +2346,7 @@ static int asense_probe_battery(struct asense_rgb *rgb)
 	error = asense_read_battery(rgb, &battery);
 	if (error) {
 		if (!asense_reference_model())
-			return -ENODEV;
+			return 0;
 		/* Preserve the reference model's early-boot retry-on-access ABI. */
 		rgb->battery_limit_available = true;
 		rgb->battery_calibration_available = true;
@@ -2160,7 +2357,7 @@ static int asense_probe_battery(struct asense_rgb *rgb)
 	}
 	if (!rgb->battery_limit_available &&
 	    !rgb->battery_calibration_available)
-		return -ENODEV;
+		return 0;
 	return devm_device_add_group(&rgb->wdev->dev, &asense_battery_group);
 }
 
@@ -2173,7 +2370,7 @@ static int asense_probe_apge(struct asense_rgb *rgb)
 	rgb->timeout_available = !asense_read_timeout(rgb, &enabled) ||
 		asense_reference_model();
 	if (!rgb->usb_available && !rgb->timeout_available)
-		return -ENODEV;
+		return 0;
 	return devm_device_add_group(&rgb->wdev->dev, &asense_apge_group);
 }
 
@@ -2181,6 +2378,7 @@ static int asense_rgb_probe(struct wmi_device *wdev, const void *context)
 {
 	const struct asense_endpoint *endpoint = context;
 	struct asense_rgb *rgb;
+	int error;
 
 	if (!dmi_match(DMI_SYS_VENDOR, "Acer") || !endpoint)
 		return -ENODEV;
@@ -2189,8 +2387,12 @@ static int asense_rgb_probe(struct wmi_device *wdev, const void *context)
 	if (!rgb)
 		return -ENOMEM;
 	rgb->wdev = wdev;
+	rgb->endpoint_type = endpoint->type;
 	mutex_init(&rgb->lock);
 	dev_set_drvdata(&wdev->dev, rgb);
+	error = devm_device_add_group(&wdev->dev, &asense_diagnostic_group);
+	if (error)
+		return error;
 
 	switch (endpoint->type) {
 	case ASENSE_ENDPOINT_GAMING:
@@ -2244,4 +2446,4 @@ module_wmi_driver(asense_rgb_driver);
 MODULE_AUTHOR("ASense contributors");
 MODULE_DESCRIPTION("Bounded Acer Gaming, Battery and APGE WMI transport");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.2.2");
+MODULE_VERSION("0.3.0-rc.1");
