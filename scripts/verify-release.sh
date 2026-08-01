@@ -81,6 +81,11 @@ grep --fixed-strings "ASense $version" debian/asense.1 >/dev/null
 grep --fixed-strings "ASense $version" debian/asense-configure-user.8 >/dev/null
 grep --fixed-strings "<release version=\"$version\"" \
   debian/io.github.fladirm.asense.metainfo.xml >/dev/null
+grep --fixed-strings --line-regexp \
+  "rustflag_separator := \$(shell printf '\\037')" debian/rules >/dev/null
+grep --fixed-strings --line-regexp \
+  'export CARGO_ENCODED_RUSTFLAGS := --remap-path-prefix=$(CURDIR)=/usr/src/asense$(rustflag_separator)--remap-path-prefix=$(HOME)=/usr/src/build-home' \
+  debian/rules >/dev/null
 
 run "${cargo_command[@]}" test --locked --all-targets --all-features
 run "${cargo_command[@]}" test --locked --test kernel_rgb_protocol

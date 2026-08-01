@@ -5,6 +5,8 @@ export CARGO_TARGET_DIR := $(CURDIR)/target/debian
 export CARGO_NET_OFFLINE := true
 export CARGO_PROFILE_RELEASE_STRIP := false
 export CARGO_PROFILE_RELEASE_DEBUG := 1
+rustflag_separator := $(shell printf '\037')
+export CARGO_ENCODED_RUSTFLAGS := --remap-path-prefix=$(CURDIR)=/usr/src/asense$(rustflag_separator)--remap-path-prefix=$(HOME)=/usr/src/build-home
 
 %:
 	dh $@ --with dkms
