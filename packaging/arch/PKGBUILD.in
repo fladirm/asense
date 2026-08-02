@@ -1,0 +1,107 @@
+# Maintainer: Fladirmacht <fladirmacht@gmail.com>
+pkgname=asense
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='Native Linux control center for Acer Predator and Nitro laptops'
+arch=('x86_64')
+url='https://github.com/fladirm/asense'
+license=('GPL-2.0-only')
+depends=(
+  'bash'
+  'cairo'
+  'dkms'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'kmod'
+  'libgcc'
+  'libsoup3'
+  'openssl'
+  'python'
+  'systemd'
+  'webkit2gtk-4.1'
+  'xdotool'
+)
+makedepends=('cargo' 'pkgconf' 'rust')
+optdepends=('linux-headers: build the DKMS transport for the stock Arch kernel')
+provides=('asense')
+conflicts=('asense-bin' 'asense-git')
+options=('!debug')
+install=asense.install
+source=("asense-${pkgver}.tar.gz::@SOURCE_URL@")
+sha256sums=('@SOURCE_SHA256@')
+
+prepare() {
+  cd "asense-${pkgver}"
+  cargo fetch --locked --target "${CARCH}-unknown-linux-gnu"
+}
+
+build() {
+  cd "asense-${pkgver}"
+  CARGO_TARGET_DIR=target cargo build --frozen --release --all-features --bins
+}
+
+check() {
+  cd "asense-${pkgver}"
+  CARGO_TARGET_DIR=target cargo test --frozen --all-targets --all-features
+}
+
+package() {
+  cd "asense-${pkgver}"
+
+  install -Dm755 target/release/asense "$pkgdir/usr/bin/asense"
+  install -Dm755 target/release/asensed "$pkgdir/usr/lib/asense/asensed"
+  install -Dm755 debian/asense-configure-user \
+    "$pkgdir/usr/bin/asense-configure-user"
+  install -Dm755 debian/asense-shortcut \
+    "$pkgdir/usr/lib/asense/asense-shortcut"
+  install -Dm644 packaging/common.sh \
+    "$pkgdir/usr/lib/asense/packaging/common.sh"
+  install -Dm644 packaging/asense.socket.in \
+    "$pkgdir/usr/lib/asense/asense.socket.in"
+
+  install -Dm644 packaging/asense.service \
+    "$pkgdir/usr/lib/systemd/system/asense.service"
+  install -Dm755 packaging/asense-system-sleep \
+    "$pkgdir/usr/lib/systemd/system-sleep/asense"
+  install -Dm644 packaging/71-asense-hid.rules \
+    "$pkgdir/usr/lib/udev/rules.d/71-asense-hid.rules"
+  install -Dm644 packaging/90-asense-predator-key.hwdb \
+    "$pkgdir/usr/lib/udev/hwdb.d/90-asense-predator-key.hwdb"
+
+  install -Dm644 assets/asense.desktop \
+    "$pkgdir/usr/share/applications/asense.desktop"
+  install -Dm644 assets/asense.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/asense.svg"
+  install -Dm644 debian/io.github.fladirm.asense.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/io.github.fladirm.asense.metainfo.xml"
+  install -Dm644 debian/asense.1 "$pkgdir/usr/share/man/man1/asense.1"
+  install -Dm644 debian/asense-configure-user.8 \
+    "$pkgdir/usr/share/man/man8/asense-configure-user.8"
+
+  install -Dm644 kernel/asense_rgb.c \
+    "$pkgdir/usr/src/asense-rgb-${pkgver}/asense_rgb.c"
+  install -Dm644 kernel/Makefile \
+    "$pkgdir/usr/src/asense-rgb-${pkgver}/Makefile"
+  install -Dm644 kernel/dkms.conf \
+    "$pkgdir/usr/src/asense-rgb-${pkgver}/dkms.conf"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/asense/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/asense/README.md"
+  install -Dm644 docs/PROBE_PRIVACY.md \
+    "$pkgdir/usr/share/doc/asense/PROBE_PRIVACY.md"
+  install -Dm644 docs/PROBE_SCHEMA_V3.md \
+    "$pkgdir/usr/share/doc/asense/PROBE_SCHEMA_V3.md"
+  install -Dm644 "docs/RELEASE_NOTES_v${pkgver}.md" \
+    "$pkgdir/usr/share/doc/asense/RELEASE_NOTES.md"
+
+  # Arch packages use /usr/lib for private executables. Keep the upstream
+  # Debian/standalone layout unchanged and rewrite only the packaged Arch
+  # copies that form one internally consistent ownership domain.
+  sed -i 's#/usr/libexec/asense#/usr/lib/asense#g' \
+    "$pkgdir/usr/bin/asense-configure-user" \
+    "$pkgdir/usr/lib/asense/asense-shortcut" \
+    "$pkgdir/usr/lib/systemd/system/asense.service"
+}

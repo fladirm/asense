@@ -36,21 +36,23 @@
   <url type="donation">https://github.com/fladirm/asense/blob/main/DONATE.md</url>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/fladirm/asense/v0.2.0/docs/screenshots/asense-advanced.png</image>
+      <image>https://raw.githubusercontent.com/fladirm/asense/v0.3.0/docs/screenshots/asense-advanced.png</image>
       <caption>Advanced telemetry and Acer laptop controls</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/fladirm/asense/v0.2.0/docs/screenshots/asense-compact.png</image>
+      <image>https://raw.githubusercontent.com/fladirm/asense/v0.3.0/docs/screenshots/asense-compact.png</image>
       <caption>Compact ASense control panel</caption>
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.3.0-rc.1" date="2026-08-01" type="development">
+    <release version="0.3.0" date="2026-08-02">
+      <url>https://github.com/fladirm/asense/releases/tag/v0.3.0</url>
       <description>
         <p>
-          Adds a bounded passive schema-3 compatibility probe, exact
-          source/error evidence and a synchronized privacy/support workflow.
-          This diagnostic candidate does not add unverified hardware controls.
+          Adds the bounded passive schema-3 compatibility probe, complete
+          English, Czech and Simplified Chinese catalogs, and reproducible
+          Ubuntu, Debian and Arch packaging authorities. Unverified firmware
+          controls remain excluded.
         </p>
       </description>
     </release>

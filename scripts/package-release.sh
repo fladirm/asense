@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command in cargo cut find getconf git grep head install mktemp rustc sed sha256sum sort strings touch uname zip; do
+for command in cargo cut dpkg-parsechangelog find getconf git grep install mktemp rustc sha256sum sort strings touch uname zip; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'asense-release: missing command: %s\n' "$command" >&2
     exit 1
@@ -26,18 +26,8 @@ worktree_status="$(git status --porcelain=v1 --untracked-files=all)"
   exit 1
 }
 
-version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
-[[ -n "$version" ]] || {
-  printf 'asense-release: cannot read package version\n' >&2
-  exit 1
-}
-dkms_version="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"$/\1/p' kernel/dkms.conf)"
-module_version="$(sed -n 's/^MODULE_VERSION("\([^"]*\)");$/\1/p' kernel/asense_rgb.c)"
-[[ "$dkms_version" == "$version" && "$module_version" == "$version" ]] || {
-  printf 'asense-release: Cargo, DKMS and kernel module versions must match (%s, %s, %s)\n' \
-    "$version" "$dkms_version" "$module_version" >&2
-  exit 1
-}
+scripts/version.sh check
+version="$(scripts/version.sh show)"
 commit="$(git rev-parse --verify HEAD)"
 short_commit="$(git rev-parse --short=12 HEAD)"
 source_date_epoch="$(git show -s --format=%ct HEAD)"

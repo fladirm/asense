@@ -35,6 +35,9 @@ use crate::telemetry::{
 use crate::tuning::GpuOffsetState;
 
 mod docs_modal;
+mod i18n;
+
+use i18n::{LocaleId as Language, MessageId, text};
 
 const APP_CSS: &str = include_str!("../assets/style.css");
 #[allow(dead_code)]
@@ -100,186 +103,266 @@ const RESIZE_SCRIPT: &str = r#"
 })();
 "#;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Language {
-    Czech,
+const RAW_DETAIL_MAX_CHARS: usize = 512;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawDetail(String);
+
+impl RawDetail {
+    fn new(value: impl AsRef<str>) -> Self {
+        let value = value.as_ref();
+        let mut bounded = value.chars().take(RAW_DETAIL_MAX_CHARS).collect::<String>();
+        if value.chars().count() > RAW_DETAIL_MAX_CHARS {
+            bounded.push('…');
+        }
+        Self(bounded)
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UiDiagnostic {
+    Lighting(RawDetail),
+    Platform(PlatformIssue),
+    Hardware(RawDetail),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlatformReadErrorSet(u8);
+
+impl PlatformReadErrorSet {
+    fn from_mask(mask: u8) -> Option<Self> {
+        (mask != 0).then_some(Self(mask))
+    }
+
+    fn contains(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PlatformIssue {
+    Readback(PlatformReadErrorSet),
+    Raw(RawDetail),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiErrorKind {
+    Initialization,
+    Fan,
+    Profile,
+    Lighting,
+    Platform,
+    Refresh,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum UiStatus {
     #[default]
-    English,
+    AcerControlsConnected,
+    AcerNvidiaControlsConnected,
+    ReadOnlyTelemetryConnected,
+    ConnectingControls,
+    PlatformRefreshed,
+    SettingsConfirmed,
+    LightingConfirmed,
+    AppliedWithoutReadback,
+    WritingAndVerifying,
+    ProfileVerified(ProfileApplyReceipt),
+    GpuProfileMismatch {
+        core_mhz: i32,
+        memory_mhz: i32,
+    },
+    PartialCapabilities(Vec<UiDiagnostic>),
+    PlatformReadbackFailed(PlatformReadErrorSet),
+    Failure {
+        kind: UiErrorKind,
+        detail: RawDetail,
+    },
 }
 
-impl Language {
-    fn toggle(self) -> Self {
-        match self {
-            Self::Czech => Self::English,
-            Self::English => Self::Czech,
-        }
-    }
-
-    fn code(self) -> &'static str {
-        match self {
-            Self::Czech => "CZ",
-            Self::English => "EN",
-        }
-    }
-
-    fn html_code(self) -> &'static str {
-        match self {
-            Self::Czech => "cs",
-            Self::English => "en",
-        }
+fn error_kind_message(kind: UiErrorKind) -> MessageId {
+    match kind {
+        UiErrorKind::Initialization => MessageId::StatusInitializationFailure,
+        UiErrorKind::Fan => MessageId::StatusFanFailure,
+        UiErrorKind::Profile => MessageId::StatusProfileFailure,
+        UiErrorKind::Lighting => MessageId::StatusLightingFailure,
+        UiErrorKind::Platform => MessageId::StatusPlatformFailure,
+        UiErrorKind::Refresh => MessageId::StatusRefreshFailure,
     }
 }
 
-fn tr(language: Language, czech: &'static str, english: &'static str) -> &'static str {
-    match language {
-        Language::Czech => czech,
-        Language::English => english,
+fn render_platform_fields(language: Language, fields: PlatformReadErrorSet) -> String {
+    let mut names = Vec::new();
+    for (bit, id) in [
+        (
+            READ_ERROR_BATTERY_LIMIT,
+            MessageId::PlatformFieldBatteryLimit,
+        ),
+        (
+            READ_ERROR_BATTERY_CALIBRATION,
+            MessageId::PlatformFieldBatteryCalibration,
+        ),
+        (READ_ERROR_USB_CHARGING, MessageId::PlatformFieldUsbCharging),
+        (
+            READ_ERROR_KEYBOARD_TIMEOUT,
+            MessageId::PlatformFieldKeyboardTimeout,
+        ),
+        (READ_ERROR_BOOT_SOUND, MessageId::PlatformFieldBootSound),
+        (READ_ERROR_LCD_OVERRIDE, MessageId::PlatformFieldLcdOverride),
+        (READ_ERROR_REAR_LOGO, MessageId::PlatformFieldRearLogo),
+    ] {
+        if fields.contains(bit) {
+            names.push(text(language, id));
+        }
+    }
+    names.join(", ")
+}
+
+fn render_platform_issue(language: Language, issue: &PlatformIssue) -> String {
+    match issue {
+        PlatformIssue::Readback(fields) => format!(
+            "{}: {}",
+            text(language, MessageId::StatusPlatformReadbackFailed),
+            render_platform_fields(language, *fields)
+        ),
+        PlatformIssue::Raw(detail) => format!(
+            "{}: {}",
+            text(language, MessageId::StatusPlatformFailure),
+            detail.as_str()
+        ),
     }
 }
 
-fn localized_status(language: Language, status: &str) -> String {
-    if language == Language::Czech {
-        return status.to_string();
+fn render_diagnostic(language: Language, diagnostic: &UiDiagnostic) -> String {
+    match diagnostic {
+        UiDiagnostic::Lighting(detail) => format!(
+            "{}: {}",
+            text(language, MessageId::DiagnosticRgb),
+            detail.as_str()
+        ),
+        UiDiagnostic::Platform(PlatformIssue::Readback(fields)) => format!(
+            "{}: {}",
+            text(language, MessageId::DiagnosticPlatform),
+            render_platform_fields(language, *fields)
+        ),
+        UiDiagnostic::Platform(PlatformIssue::Raw(detail)) => format!(
+            "{}: {}",
+            text(language, MessageId::DiagnosticPlatform),
+            detail.as_str()
+        ),
+        UiDiagnostic::Hardware(detail) => format!(
+            "{}: {}",
+            text(language, MessageId::DiagnosticHardware),
+            detail.as_str()
+        ),
+    }
+}
+
+fn render_profile_receipt(language: Language, receipt: &ProfileApplyReceipt) -> String {
+    let offsets = match receipt.gpu_offsets {
+        GpuOffsetState::Unavailable => {
+            text(language, MessageId::StatusOffsetUnavailable).to_string()
+        }
+        GpuOffsetState::Reset => "+0/+0 MHz".to_string(),
+        GpuOffsetState::OemTurbo => "+100/+200 MHz".to_string(),
+        GpuOffsetState::CustomOrPartial => {
+            text(language, MessageId::StatusOffsetCustomOrPartial).to_string()
+        }
+    };
+    let power = receipt.power.as_ref().map_or_else(
+        || text(language, MessageId::StatusGpuLimitUnavailable).to_string(),
+        |power| {
+            format!(
+                "GPU {}/{} W",
+                format_milliwatts(power.enforced_limit_mw),
+                format_milliwatts(power.maximum_limit_mw)
+            )
+        },
+    );
+    format!(
+        "{}: Acer {} · VF {offsets} · {power}",
+        text(language, MessageId::StatusProfileVerified),
+        receipt.firmware_profile
+    )
+}
+
+fn render_ui_status(language: Language, status: &UiStatus) -> String {
+    let static_id = match status {
+        UiStatus::AcerControlsConnected => Some(MessageId::StatusAcerControlsConnected),
+        UiStatus::AcerNvidiaControlsConnected => Some(MessageId::StatusAcerNvidiaControlsConnected),
+        UiStatus::ReadOnlyTelemetryConnected => Some(MessageId::StatusReadOnlyTelemetryConnected),
+        UiStatus::ConnectingControls => Some(MessageId::StatusConnectingControls),
+        UiStatus::PlatformRefreshed => Some(MessageId::StatusPlatformRefreshed),
+        UiStatus::SettingsConfirmed => Some(MessageId::StatusSettingsConfirmed),
+        UiStatus::LightingConfirmed => Some(MessageId::StatusLightingConfirmed),
+        UiStatus::AppliedWithoutReadback => Some(MessageId::StatusAppliedWithoutReadback),
+        UiStatus::WritingAndVerifying => Some(MessageId::StatusWritingAndVerifying),
+        _ => None,
+    };
+    if let Some(id) = static_id {
+        return text(language, id).to_string();
     }
     match status {
-        "Ovládání Acer připojeno" => "Acer controls connected".to_string(),
-        "Ovládání Acer + NVIDIA připojeno" => "Acer + NVIDIA controls connected".to_string(),
-        "Připojena telemetrie jen pro čtení" => "Read-only telemetry connected".to_string(),
-        "Připojuji ovládání" => "Connecting controls".to_string(),
-        "Platforma znovu načtena" => "Platform state refreshed".to_string(),
-        "Nastavení potvrzeno firmwarem" => "Settings confirmed by firmware".to_string(),
-        "Nastavení podsvícení potvrzeno firmwarem" => {
-            "Lighting confirmed by firmware".to_string()
-        }
-        "Použito · stav nelze přečíst" => "Applied · state readback unavailable".to_string(),
-        "Zapisuji a ověřuji firmware" => "Writing and verifying firmware".to_string(),
-        _ if status.starts_with("Profil potvrzen: ") => {
-            status.replacen("Profil potvrzen:", "Profile verified:", 1)
-        }
-        _ if status.starts_with("GPU profil není synchronní:") => status.replacen(
-            "GPU profil není synchronní:",
-            "GPU profile is out of sync:",
-            1,
+        UiStatus::ProfileVerified(receipt) => render_profile_receipt(language, receipt),
+        UiStatus::GpuProfileMismatch {
+            core_mhz,
+            memory_mhz,
+        } => format!(
+            "{}: core {core_mhz:+} / VRAM {memory_mhz:+} MHz",
+            text(language, MessageId::StatusGpuMismatch)
         ),
-        _ => status.to_string(),
+        UiStatus::PartialCapabilities(diagnostics) => {
+            let details = diagnostics
+                .iter()
+                .map(|diagnostic| render_diagnostic(language, diagnostic))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "{}: {details}",
+                text(language, MessageId::StatusPartialCapabilities)
+            )
+        }
+        UiStatus::PlatformReadbackFailed(fields) => format!(
+            "{}: {}",
+            text(language, MessageId::StatusPlatformReadbackFailed),
+            render_platform_fields(language, *fields)
+        ),
+        UiStatus::Failure { kind, detail } => format!(
+            "{}: {}",
+            text(language, error_kind_message(*kind)),
+            detail.as_str()
+        ),
+        _ => unreachable!("static status was handled above"),
     }
 }
 
-fn compact_status(language: Language, status: &str) -> String {
-    for (czech, english) in [
-        ("Telemetrie se obnovuje", "Telemetry reconnecting"),
-        ("Telemetrie se připojuje", "Telemetry connecting"),
-    ] {
-        if status.contains(czech) || status.contains(english) {
-            return tr(language, czech, english).to_string();
+fn render_compact_status(language: Language, status: &UiStatus) -> String {
+    let id = match status {
+        UiStatus::SettingsConfirmed => MessageId::StatusCompactSettingsVerified,
+        UiStatus::LightingConfirmed => MessageId::StatusCompactLightingVerified,
+        UiStatus::AppliedWithoutReadback => MessageId::StatusCompactLastApplied,
+        UiStatus::WritingAndVerifying => MessageId::StatusCompactVerifying,
+        UiStatus::PlatformRefreshed => MessageId::StatusCompactPlatformRefreshed,
+        UiStatus::PartialCapabilities(_) | UiStatus::PlatformReadbackFailed(_) => {
+            MessageId::AppCompactStatus001
         }
-    }
-
-    let profile = status
-        .strip_prefix("Profil potvrzen: Acer ")
-        .or_else(|| status.strip_prefix("Profile verified: Acer "))
-        .and_then(|details| details.split(" ·").next());
-    if let Some(profile) = profile {
-        let (czech, english) = match profile {
-            "low-power" => ("Eco potvrzeno", "Eco verified"),
-            "quiet" => ("Tichý potvrzen", "Quiet verified"),
-            "balanced" => ("Balanc potvrzen", "Balanced verified"),
-            "balanced-performance" => ("Výkon potvrzen", "Performance verified"),
-            "performance" => ("Turbo potvrzeno", "Turbo verified"),
-            _ => ("Profil potvrzen", "Profile verified"),
-        };
-        return tr(language, czech, english).to_string();
-    }
-
-    for (source_czech, source_english, compact_czech, compact_english) in [
-        (
-            "Nastavení potvrzeno firmwarem",
-            "Settings confirmed by firmware",
-            "Nastavení potvrzeno",
-            "Settings verified",
-        ),
-        (
-            "Nastavení podsvícení potvrzeno firmwarem",
-            "Lighting confirmed by firmware",
-            "Podsvícení potvrzeno",
-            "Lighting verified",
-        ),
-        (
-            "Použito · stav nelze přečíst",
-            "Applied · state readback unavailable",
-            "Naposledy použito",
-            "Last applied",
-        ),
-        (
-            "Zapisuji a ověřuji firmware",
-            "Writing and verifying firmware",
-            "Ověřuji nastavení",
-            "Verifying settings",
-        ),
-        (
-            "Platforma znovu načtena",
-            "Platform state refreshed",
-            "Platforma obnovena",
-            "Platform refreshed",
-        ),
-    ] {
-        if status == source_czech || status == source_english {
-            return tr(language, compact_czech, compact_english).to_string();
-        }
-    }
-
-    if status.starts_with("Částečné capabilities:") || status.starts_with("Partial capabilities:")
-    {
-        return tr(language, "Částečný readback", "Partial readback").to_string();
-    }
-
-    let mismatch = status
-        .strip_prefix("GPU profil není synchronní:")
-        .or_else(|| status.strip_prefix("GPU profile is out of sync:"));
-    if let Some(mismatch) = mismatch {
-        let values = mismatch
-            .trim()
-            .replace("core ", "")
-            .replace("VRAM ", "")
-            .replace(" / ", "/");
-        return format!("{}: {values}", tr(language, "GPU nesedí", "GPU mismatch"));
-    }
-
-    let lower = status.to_ascii_lowercase();
-    if lower.contains("rollback") && lower.contains("failed") {
-        return tr(language, "Rollback selhal", "Rollback failed").to_string();
-    }
-    if lower.contains("readback") || lower.contains("verification failed") {
-        return tr(
-            language,
-            "Ověření stavu selhalo",
-            "State verification failed",
-        )
-        .to_string();
-    }
-    if lower.contains("unsupported") || lower.contains("not supported") {
-        return tr(
-            language,
-            "Firmware funkci nepodporuje",
-            "Unsupported by firmware",
-        )
-        .to_string();
-    }
-    if lower.contains("timed out") || lower.contains("timeout") || lower.contains("control socket")
-    {
-        return tr(
-            language,
-            "Řídicí služba neodpovídá",
-            "Control service unavailable",
-        )
-        .to_string();
-    }
-
-    if status.chars().count() > 28 {
-        tr(language, "Podrobnosti nahoře", "Details above").to_string()
-    } else {
-        status.to_string()
-    }
+        UiStatus::Failure { kind, .. } => error_kind_message(*kind),
+        UiStatus::ProfileVerified(receipt) => match receipt.firmware_profile.as_str() {
+            "low-power" => MessageId::StatusCompactProfileEco,
+            "quiet" => MessageId::StatusCompactProfileQuiet,
+            "balanced" => MessageId::StatusCompactProfileBalanced,
+            "balanced-performance" => MessageId::StatusCompactProfilePerformance,
+            "performance" => MessageId::StatusCompactProfileTurbo,
+            _ => MessageId::StatusCompactProfileGeneric,
+        },
+        UiStatus::GpuProfileMismatch { .. } => MessageId::AppCompactStatus002,
+        _ => return render_ui_status(language, status),
+    };
+    text(language, id).to_string()
 }
 
 fn design_width(advanced: bool) -> f64 {
@@ -631,7 +714,7 @@ impl RuntimeState {
             platform_busy: true,
             control_busy: true,
             health: HealthState::Applying,
-            status_message: "Připojuji ovládání".to_string(),
+            status: UiStatus::ConnectingControls,
             controls_enabled: false,
             telemetry_health: TelemetryHealth::Connecting,
             ..AppState::default()
@@ -645,7 +728,32 @@ enum TelemetryHealth {
     Connecting,
     #[default]
     Online,
-    Reconnecting,
+    Reconnecting {
+        retry_after_seconds: u64,
+    },
+}
+
+fn render_telemetry_status(
+    language: Language,
+    health: TelemetryHealth,
+) -> Option<(String, String)> {
+    match health {
+        TelemetryHealth::Online => None,
+        TelemetryHealth::Connecting => {
+            let status = text(language, MessageId::StatusTelemetryConnecting).to_string();
+            Some((status.clone(), status))
+        }
+        TelemetryHealth::Reconnecting {
+            retry_after_seconds,
+        } => Some((
+            format!(
+                "{} · {} {retry_after_seconds} s",
+                text(language, MessageId::StatusTelemetryReconnecting),
+                text(language, MessageId::StatusRetryIn)
+            ),
+            text(language, MessageId::StatusTelemetryReconnecting).to_string(),
+        )),
+    }
 }
 
 enum TelemetryUpdate {
@@ -748,6 +856,17 @@ enum ControlAction {
 impl ControlAction {
     fn touches_platform(&self) -> bool {
         matches!(self, Self::Initialize | Self::Platform(_) | Self::Refresh)
+    }
+
+    fn error_kind(&self) -> UiErrorKind {
+        match self {
+            Self::Initialize => UiErrorKind::Initialization,
+            Self::FanMode(_) | Self::ManualFans(_) => UiErrorKind::Fan,
+            Self::Profile(_) => UiErrorKind::Profile,
+            Self::LightingApply(_) | Self::LightingPower(_) => UiErrorKind::Lighting,
+            Self::Platform(_) => UiErrorKind::Platform,
+            Self::Refresh => UiErrorKind::Refresh,
+        }
     }
 }
 
@@ -949,7 +1068,7 @@ fn Root() -> Element {
         _ => {}
     });
     let mut runtime = use_signal(RuntimeState::boot);
-    let mut language = use_signal(Language::default);
+    let mut language = use_signal(i18n::load_locale_preference);
     let mut advanced_open = use_signal(|| false);
     use_effect(move || {
         let _ = document::eval(RESIZE_SCRIPT);
@@ -1008,11 +1127,10 @@ fn Root() -> Element {
                         retry_after,
                     } => {
                         let mut state = runtime.write();
-                        state.view.telemetry_health = TelemetryHealth::Reconnecting;
-                        state.view.telemetry_error = Some(format!(
-                            "{message}; další pokus za {} s",
-                            retry_after.as_secs()
-                        ));
+                        state.view.telemetry_health = TelemetryHealth::Reconnecting {
+                            retry_after_seconds: retry_after.as_secs(),
+                        };
+                        state.view.telemetry_error = Some(RawDetail::new(message));
                     }
                 }
             }
@@ -1052,7 +1170,7 @@ fn Root() -> Element {
                             consecutive_failures = consecutive_failures.saturating_add(1);
                             let retry_after = telemetry_retry_delay(consecutive_failures);
                             telemetry_slot.publish_latest(TelemetryUpdate::Error {
-                                message: format!("acer_wmi telemetry není dostupná: {error}"),
+                                message: error.to_string(),
                                 retry_after,
                             });
                             std::thread::sleep(retry_after);
@@ -1108,7 +1226,7 @@ fn Root() -> Element {
         document::Title { "ASense" }
         style { "{APP_CSS}" }
         div { class: "app-window",
-            WindowChrome {}
+                    WindowChrome { language: language() }
             div {
                 class: if advanced_open() { "window-workspace advanced" } else { "window-workspace" },
                 div { class: "design-stage",
@@ -1132,7 +1250,11 @@ fn Root() -> Element {
                                 ControlRequest::foreground(ControlAction::Platform(action)),
                             );
                         },
-                        on_language: move |_| language.set(language().toggle()),
+                        on_language: move |_| {
+                            let next = language().toggle();
+                            language.set(next);
+                            let _ = i18n::save_locale_preference(next);
+                        },
                         on_refresh: move |_| {
                             queue_control_request(
                                 runtime,
@@ -1159,7 +1281,7 @@ fn Root() -> Element {
 }
 
 #[component]
-fn WindowChrome() -> Element {
+fn WindowChrome(language: Language) -> Element {
     let window = use_window();
     let drag_window = window.clone();
     let minimize_window = window.clone();
@@ -1176,7 +1298,7 @@ fn WindowChrome() -> Element {
                 button {
                     class: "window-button minimize",
                     r#type: "button",
-                    title: "Minimize",
+                    title: text(language, MessageId::WindowMinimize),
                     onmousedown: move |event| event.stop_propagation(),
                     onclick: move |_| minimize_window.set_minimized(true),
                     span { class: "minimize-mark" }
@@ -1184,7 +1306,7 @@ fn WindowChrome() -> Element {
                 button {
                     class: "window-button close",
                     r#type: "button",
-                    title: "Close",
+                    title: text(language, MessageId::WindowClose),
                     onmousedown: move |event| event.stop_propagation(),
                     onclick: move |_| close_window.close(),
                     span { class: "close-mark", "×" }
@@ -1485,7 +1607,7 @@ fn begin_control_request(view: &mut AppState, request: ControlRequest) -> bool {
     if request.foreground {
         view.health = HealthState::Applying;
         if matches!(&request.action, ControlAction::Platform(_)) {
-            view.status_message = "Zapisuji a ověřuji firmware".to_string();
+            view.status = UiStatus::WritingAndVerifying;
         }
     }
     true
@@ -1493,9 +1615,11 @@ fn begin_control_request(view: &mut AppState, request: ControlRequest) -> bool {
 
 fn fail_control_request(view: &mut AppState, request: ControlRequest, error: String) {
     view.control_busy = false;
+    let error_kind = request.action.error_kind();
+    let detail = RawDetail::new(error);
     if request.action.touches_platform() {
         view.platform_busy = false;
-        view.platform_error = Some(error.clone());
+        view.platform_error = Some(PlatformIssue::Raw(detail.clone()));
     }
     let initial_connection_failed =
         request.action == ControlAction::Initialize && view.capabilities.is_none();
@@ -1504,7 +1628,10 @@ fn fail_control_request(view: &mut AppState, request: ControlRequest, error: Str
     }
     if request.foreground || initial_connection_failed {
         view.health = HealthState::Warning;
-        view.status_message = error;
+        view.status = UiStatus::Failure {
+            kind: error_kind,
+            detail,
+        };
     }
 }
 
@@ -1517,18 +1644,23 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
     let outcome = match update.result {
         Ok(outcome) => outcome,
         Err(error) => {
+            let error_kind = update.request.action.error_kind();
+            let detail = RawDetail::new(error);
             if matches!(&update.request.action, ControlAction::Profile(_)) {
                 view.profile_sync = ProfileTelemetrySync::default();
             }
             if update.request.action.touches_platform() {
-                view.platform_error = Some(error.clone());
+                view.platform_error = Some(PlatformIssue::Raw(detail.clone()));
             }
             if update.request.action == ControlAction::Initialize && view.capabilities.is_none() {
                 view.controls_enabled = false;
             }
             if update.request.foreground || update.request.action == ControlAction::Initialize {
                 view.health = HealthState::Warning;
-                view.status_message = error;
+                view.status = UiStatus::Failure {
+                    kind: error_kind,
+                    detail,
+                };
             }
             return;
         }
@@ -1565,31 +1697,32 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
                     view.hardware_error = None;
                 }
                 Err(error) => {
-                    view.hardware_error = Some(error.clone());
-                    diagnostics.push(format!("hardware: {error}"));
+                    let detail = RawDetail::new(error);
+                    view.hardware_error = Some(detail.clone());
+                    diagnostics.push(UiDiagnostic::Hardware(detail));
                 }
             }
             if diagnostics.is_empty() {
                 let status = if acer_controls {
-                    "Ovládání Acer připojeno"
+                    UiStatus::AcerControlsConnected
                 } else {
-                    "Připojena telemetrie jen pro čtení"
+                    UiStatus::ReadOnlyTelemetryConnected
                 };
                 finish_control_success(view, status);
             } else {
                 view.health = HealthState::Warning;
-                view.status_message = format!("Částečné capabilities: {}", diagnostics.join("; "));
+                view.status = UiStatus::PartialCapabilities(diagnostics);
             }
         }
         ControlOutcome::FanMode(mode) => {
             view.fan_mode = mode;
-            finish_control_success(view, "Nastavení potvrzeno firmwarem");
+            finish_control_success(view, UiStatus::SettingsConfirmed);
         }
         ControlOutcome::ManualFans(request) => {
             view.fan_mode = FanMode::Manual;
             view.cpu_fan_percent = request.cpu_percent;
             view.gpu_fan_percent = request.gpu_percent;
-            finish_control_success(view, "Nastavení potvrzeno firmwarem");
+            finish_control_success(view, UiStatus::SettingsConfirmed);
         }
         ControlOutcome::Profile {
             profile_raw,
@@ -1610,7 +1743,7 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
                 grace_samples: PROFILE_SYNC_GRACE_SAMPLES,
                 mismatch_samples: 0,
             };
-            finish_control_success(view, &profile_receipt_status(&receipt));
+            finish_control_success(view, UiStatus::ProfileVerified(receipt));
         }
         ControlOutcome::LightingApplied {
             request,
@@ -1628,21 +1761,29 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
         }
         ControlOutcome::LightingPowered(state) => {
             view.lighting = state;
-            finish_control_success(view, "Nastavení podsvícení potvrzeno firmwarem");
+            finish_control_success(view, UiStatus::LightingConfirmed);
         }
-        ControlOutcome::Platform { action, state } => {
-            let read_error = store_platform_state(view, state);
-            if let Some(error) = read_error {
+        ControlOutcome::Platform { action, state } => match store_platform_state(view, state) {
+            Some(PlatformIssue::Readback(fields)) => {
                 view.health = HealthState::Warning;
-                view.status_message = format!("Částečné capabilities: platform: {error}");
-            } else if update.request.foreground {
+                view.status = UiStatus::PlatformReadbackFailed(fields);
+            }
+            Some(PlatformIssue::Raw(detail)) => {
+                view.health = HealthState::Warning;
+                view.status = UiStatus::Failure {
+                    kind: UiErrorKind::Platform,
+                    detail,
+                };
+            }
+            None if update.request.foreground => {
                 let status = match action {
-                    PlatformAction::Refresh => "Platforma znovu načtena",
-                    _ => "Nastavení potvrzeno firmwarem",
+                    PlatformAction::Refresh => UiStatus::PlatformRefreshed,
+                    _ => UiStatus::SettingsConfirmed,
                 };
                 finish_control_success(view, status);
             }
-        }
+            None => {}
+        },
         ControlOutcome::Refresh {
             capabilities,
             lighting,
@@ -1651,10 +1792,10 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
             let (_, diagnostics) =
                 apply_capability_snapshot(view, capabilities, lighting, platform);
             if diagnostics.is_empty() {
-                finish_control_success(view, "Platforma znovu načtena");
+                finish_control_success(view, UiStatus::PlatformRefreshed);
             } else {
                 view.health = HealthState::Warning;
-                view.status_message = format!("Částečné capabilities: {}", diagnostics.join("; "));
+                view.status = UiStatus::PartialCapabilities(diagnostics);
             }
         }
     }
@@ -1665,7 +1806,7 @@ fn apply_capability_snapshot(
     capabilities: ControlCapabilities,
     lighting: Result<KeyboardLightingState, String>,
     platform: Result<PlatformState, String>,
-) -> (bool, Vec<String>) {
+) -> (bool, Vec<UiDiagnostic>) {
     let reference_model = capabilities.reference_model;
     let acer_controls = capabilities.vendor.trim().eq_ignore_ascii_case("acer");
     view.platform_profile_raw = capabilities.profiles.current.clone();
@@ -1691,26 +1832,29 @@ fn apply_capability_snapshot(
             // the fresh capability snapshot still advertises. Keep the last
             // verified readback (or the unavailable default during initial
             // discovery) and surface the read error separately.
-            view.lighting_error = Some(error.clone());
-            diagnostics.push(format!("RGB: {error}"));
+            let detail = RawDetail::new(error);
+            view.lighting_error = Some(detail.clone());
+            diagnostics.push(UiDiagnostic::Lighting(detail));
         }
     }
     match platform {
         Ok(platform) => {
-            if let Some(error) = store_platform_state(view, platform) {
-                diagnostics.push(format!("platform: {error}"));
+            if let Some(issue) = store_platform_state(view, platform) {
+                diagnostics.push(UiDiagnostic::Platform(issue));
             }
         }
         Err(error) => {
-            view.platform_error = Some(error.clone());
-            diagnostics.push(format!("platform: {error}"));
+            let issue = PlatformIssue::Raw(RawDetail::new(error));
+            view.platform_error = Some(issue.clone());
+            diagnostics.push(UiDiagnostic::Platform(issue));
         }
     }
     (acer_controls, diagnostics)
 }
 
-fn store_platform_state(view: &mut AppState, platform: PlatformState) -> Option<String> {
-    let error = platform_read_error_summary(platform.read_error_mask);
+fn store_platform_state(view: &mut AppState, platform: PlatformState) -> Option<PlatformIssue> {
+    let error =
+        PlatformReadErrorSet::from_mask(platform.read_error_mask).map(PlatformIssue::Readback);
     if let Some(logo) = platform.rear_logo
         && logo.brightness > 0
     {
@@ -1722,61 +1866,17 @@ fn store_platform_state(view: &mut AppState, platform: PlatformState) -> Option<
     error
 }
 
-fn platform_read_error_summary(mask: u8) -> Option<String> {
-    if mask == 0 {
-        return None;
-    }
-    let mut names = Vec::new();
-    for (bit, name) in [
-        (READ_ERROR_BATTERY_LIMIT, "battery limit"),
-        (READ_ERROR_BATTERY_CALIBRATION, "battery calibration"),
-        (READ_ERROR_USB_CHARGING, "USB charging"),
-        (READ_ERROR_KEYBOARD_TIMEOUT, "keyboard timeout"),
-        (READ_ERROR_BOOT_SOUND, "boot sound"),
-        (READ_ERROR_LCD_OVERRIDE, "LCD override"),
-        (READ_ERROR_REAR_LOGO, "rear logo"),
-    ] {
-        if mask & bit != 0 {
-            names.push(name);
-        }
-    }
-    Some(format!("readback failed: {}", names.join(", ")))
-}
-
-fn finish_control_success(view: &mut AppState, status: &str) {
+fn finish_control_success(view: &mut AppState, status: UiStatus) {
     view.health = HealthState::Healthy;
-    view.status_message = status.to_string();
+    view.status = status;
 }
 
-fn lighting_apply_status(state_readable: bool) -> &'static str {
+fn lighting_apply_status(state_readable: bool) -> UiStatus {
     if state_readable {
-        "Nastavení potvrzeno firmwarem"
+        UiStatus::SettingsConfirmed
     } else {
-        "Použito · stav nelze přečíst"
+        UiStatus::AppliedWithoutReadback
     }
-}
-
-fn profile_receipt_status(receipt: &ProfileApplyReceipt) -> String {
-    let offsets = match receipt.gpu_offsets {
-        GpuOffsetState::Unavailable => "nedostupné".to_string(),
-        GpuOffsetState::Reset => "+0/+0 MHz".to_string(),
-        GpuOffsetState::OemTurbo => "+100/+200 MHz".to_string(),
-        GpuOffsetState::CustomOrPartial => "vlastní/částečné".to_string(),
-    };
-    let power = receipt.power.as_ref().map_or_else(
-        || "GPU limit nedostupný".to_string(),
-        |power| {
-            format!(
-                "GPU {}/{} W",
-                format_milliwatts(power.enforced_limit_mw),
-                format_milliwatts(power.maximum_limit_mw)
-            )
-        },
-    );
-    format!(
-        "Profil potvrzen: Acer {} · VF {offsets} · {power}",
-        receipt.firmware_profile
-    )
 }
 
 fn format_milliwatts(value: u32) -> String {
@@ -1849,17 +1949,13 @@ fn set_lighting_power(
 }
 
 fn clear_profile_mismatch(view: &mut AppState, nvidia_offsets_available: bool) {
-    if view
-        .status_message
-        .starts_with("GPU profil není synchronní:")
-    {
+    if matches!(view.status, UiStatus::GpuProfileMismatch { .. }) {
         view.health = HealthState::Healthy;
-        view.status_message = if nvidia_offsets_available {
-            "Ovládání Acer + NVIDIA připojeno"
+        view.status = if nvidia_offsets_available {
+            UiStatus::AcerNvidiaControlsConnected
         } else {
-            "Ovládání Acer připojeno"
-        }
-        .to_string();
+            UiStatus::AcerControlsConnected
+        };
     }
 }
 
@@ -1919,8 +2015,10 @@ fn reconcile_profile_telemetry(
                 return;
             };
             view.health = HealthState::Warning;
-            view.status_message =
-                format!("GPU profil není synchronní: core {core:+} / VRAM {memory:+} MHz");
+            view.status = UiStatus::GpuProfileMismatch {
+                core_mhz: core,
+                memory_mhz: memory,
+            };
         }
         Some(true) => {
             view.platform_profile = observed_profile;
@@ -2070,25 +2168,17 @@ impl FanMode {
 
     fn label(self, language: Language) -> &'static str {
         match self {
-            Self::Auto => "Auto",
-            Self::Manual => tr(language, "Ručně", "Manual"),
-            Self::Maximum => "Maximum",
+            Self::Auto => text(language, MessageId::FanModeAuto),
+            Self::Manual => text(language, MessageId::AppLabel001),
+            Self::Maximum => text(language, MessageId::FanModeMaximum),
         }
     }
 
     fn hint(self, language: Language) -> &'static str {
         match self {
-            Self::Auto => tr(
-                language,
-                "Firmware řídí chlazení",
-                "Firmware controls cooling",
-            ),
-            Self::Manual => tr(language, "Vlastní pevné otáčky", "Custom fixed fan speed"),
-            Self::Maximum => tr(
-                language,
-                "Plný výkon ventilátorů",
-                "Maximum fan performance",
-            ),
+            Self::Auto => text(language, MessageId::AppHint001),
+            Self::Manual => text(language, MessageId::AppHint002),
+            Self::Maximum => text(language, MessageId::AppHint003),
         }
     }
 }
@@ -2114,11 +2204,11 @@ impl PlatformProfile {
 
     fn label(self, language: Language) -> &'static str {
         match self {
-            Self::LowPower => "Eco",
-            Self::Quiet => tr(language, "Tichý", "Quiet"),
-            Self::Balanced => tr(language, "Balanc", "Balanced"),
-            Self::Performance => tr(language, "Výkon", "Performance"),
-            Self::Turbo => "Turbo",
+            Self::LowPower => text(language, MessageId::ProfileEco),
+            Self::Quiet => text(language, MessageId::AppLabel002),
+            Self::Balanced => text(language, MessageId::AppLabel003),
+            Self::Performance => text(language, MessageId::AppLabel004),
+            Self::Turbo => text(language, MessageId::ProfileTurbo),
         }
     }
 
@@ -2172,7 +2262,7 @@ fn profile_display_label(
 ) -> String {
     let Some(raw) = raw else {
         if capabilities.is_some_and(|capabilities| capabilities.profiles.backend.is_none()) {
-            return tr(language, "Nedostupné", "Unavailable").to_string();
+            return text(language, MessageId::CommonUnavailable).to_string();
         }
         return fallback.label(language).to_string();
     };
@@ -2203,9 +2293,9 @@ pub enum HealthState {
 impl HealthState {
     fn label(self, language: Language) -> &'static str {
         match self {
-            Self::Healthy => tr(language, "Připraveno", "Ready"),
-            Self::Applying => tr(language, "Nastavuji", "Applying"),
-            Self::Warning => tr(language, "Zkontrolovat", "Check"),
+            Self::Healthy => text(language, MessageId::AppLabel005),
+            Self::Applying => text(language, MessageId::AppLabel006),
+            Self::Warning => text(language, MessageId::AppLabel007),
         }
     }
 
@@ -2375,19 +2465,19 @@ pub struct AppState {
     profile_sync: ProfileTelemetrySync,
     pub lighting: KeyboardLightingState,
     last_applied_lighting: Vec<LightingApplyRequest>,
-    pub lighting_error: Option<String>,
+    lighting_error: Option<RawDetail>,
     pub platform: Option<PlatformState>,
     pub platform_busy: bool,
-    pub platform_error: Option<String>,
-    pub hardware_error: Option<String>,
+    platform_error: Option<PlatformIssue>,
+    hardware_error: Option<RawDetail>,
     pub platform_revision: u64,
     rear_logo_last_nonzero_brightness: u8,
     pub control_busy: bool,
     pub health: HealthState,
-    pub status_message: String,
+    status: UiStatus,
     pub controls_enabled: bool,
     telemetry_health: TelemetryHealth,
-    telemetry_error: Option<String>,
+    telemetry_error: Option<RawDetail>,
 }
 
 impl Default for AppState {
@@ -2420,7 +2510,7 @@ impl Default for AppState {
             rear_logo_last_nonzero_brightness: 100,
             control_busy: false,
             health: HealthState::Healthy,
-            status_message: "Ovládání Acer připojeno".into(),
+            status: UiStatus::AcerControlsConnected,
             controls_enabled: true,
             telemetry_health: TelemetryHealth::Online,
             telemetry_error: None,
@@ -2468,28 +2558,23 @@ fn Dashboard(
 ) -> Element {
     let mut docs_open = use_signal(|| false);
     let telemetry = state.telemetry.clone();
-    let localized_control_status = localized_status(language, &state.status_message);
-    let telemetry_status = match state.telemetry_health {
-        TelemetryHealth::Online => None,
-        TelemetryHealth::Connecting => Some(tr(
-            language,
-            "Telemetrie se připojuje",
-            "Telemetry connecting",
-        )),
-        TelemetryHealth::Reconnecting => Some(tr(
-            language,
-            "Telemetrie se obnovuje",
-            "Telemetry reconnecting",
-        )),
-    };
-    let localized_status_message = telemetry_status.map_or_else(
+    let localized_control_status = render_ui_status(language, &state.status);
+    let compact_control_status = render_compact_status(language, &state.status);
+    let telemetry_status = render_telemetry_status(language, state.telemetry_health);
+    let localized_status_message = telemetry_status.as_ref().map_or_else(
         || localized_control_status.clone(),
-        |status| format!("{localized_control_status} · {status}"),
+        |(status, _)| format!("{localized_control_status} · {status}"),
     );
-    let status_title = state.telemetry_error.as_deref().map_or_else(
+    let compact_status_message =
+        telemetry_status.map_or(compact_control_status, |(_, compact)| compact);
+    let status_title = state.telemetry_error.as_ref().map_or_else(
         || localized_status_message.clone(),
-        |error| format!("{localized_status_message}: {error}"),
+        |error| format!("{localized_status_message}: {}", error.as_str()),
     );
+    let localized_platform_error = state
+        .platform_error
+        .as_ref()
+        .map(|issue| render_platform_issue(language, issue));
     let displayed_health = if state.health == HealthState::Applying {
         HealthState::Applying
     } else if state.health == HealthState::Warning
@@ -2510,12 +2595,12 @@ fn Dashboard(
             class: shell_class,
             lang: language.html_code(),
 
-            section { class: "primary-panel", "aria-label": tr(language, "Ovládání notebooku", "Laptop controls"),
+            section { class: "primary-panel", "aria-label": text(language, MessageId::AppDashboard003),
                 AppHeader {
                     product_name: state.product_name,
                     model_name: state.model_name,
                     health: displayed_health,
-                    status_message: status_title,
+                    status_message: status_title.clone(),
                     control_busy: state.control_busy,
                     language,
                     advanced_open,
@@ -2536,7 +2621,7 @@ fn Dashboard(
                     language,
                 }
 
-                CoolingOverview { telemetry: telemetry.clone() }
+                CoolingOverview { telemetry: telemetry.clone(), language }
 
                 ControlDock {
                     fan_mode: state.fan_mode,
@@ -2561,7 +2646,8 @@ fn Dashboard(
 
                 StatusBar {
                     telemetry,
-                    status_message: localized_status_message,
+                    status_message: status_title.clone(),
+                    displayed_status: compact_status_message,
                     health: displayed_health,
                     language,
                 }
@@ -2575,7 +2661,7 @@ fn Dashboard(
                     history: state.history,
                     platform: state.platform,
                     platform_busy: state.control_busy || state.platform_busy,
-                    platform_error: state.platform_error,
+                    platform_error: localized_platform_error,
                     platform_revision: state.platform_revision,
                     rear_logo_last_nonzero_brightness: state.rear_logo_last_nonzero_brightness,
                     on_platform,
@@ -2618,8 +2704,8 @@ fn AppHeader(
                 button {
                     class: "info-toggle",
                     r#type: "button",
-                    title: tr(language, "O aplikaci a dokumentace", "About and documentation"),
-                    "aria-label": tr(language, "Otevřít informace a dokumentaci", "Open information and documentation"),
+                    title: text(language, MessageId::AppHeader001),
+                    "aria-label": text(language, MessageId::AppHeader002),
                     onclick: move |_| {
                         on_info.call(());
                         let _ = document::eval(
@@ -2631,9 +2717,9 @@ fn AppHeader(
                 button {
                     class: "language-toggle",
                     r#type: "button",
-                    title: tr(language, "Přepnout do angličtiny", "Switch to Czech"),
+                    title: text(language, MessageId::AppHeader003),
                     onclick: move |_| on_language.call(()),
-                    "{language.code()}"
+                    "{language.display_code()}"
                 }
                 button {
                     class: health.class(),
@@ -2650,13 +2736,13 @@ fn AppHeader(
                     role: "switch",
                     "aria-checked": advanced_open,
                     title: if advanced_open {
-                        tr(language, "Skrýt rozšířený panel", "Hide advanced panel")
+                        text(language, MessageId::AppHeader004)
                     } else {
-                        tr(language, "Zobrazit rozšířený panel", "Show advanced panel")
+                        text(language, MessageId::AppHeader005)
                     },
                     onclick: move |_| on_advanced.call(!advanced_open),
                     span { class: "toggle-indicator" }
-                    {tr(language, "Rozšířené", "Advanced")}
+                    {text(language, MessageId::AppHeader006)}
                 }
             }
         }
@@ -2666,19 +2752,19 @@ fn AppHeader(
 #[component]
 fn QuickStrip(telemetry: Telemetry, profile: String, language: Language) -> Element {
     rsx! {
-        section { class: "quick-strip", "aria-label": tr(language, "Systémová telemetrie", "System telemetry"),
+        section { class: "quick-strip", "aria-label": text(language, MessageId::AppQuickStrip001),
             MetricPill {
                 label: "CPU",
                 value: temperature(telemetry.cpu_temperature_c),
                 level: temperature_level(telemetry.cpu_temperature_c),
             }
             MetricPill {
-                label: tr(language, "ZÁTĚŽ", "LOAD"),
+                label: text(language, MessageId::CommonLoad),
                 value: percent(telemetry.cpu_load_percent),
                 level: "neutral",
             }
             div { class: "profile-pill",
-                span { {tr(language, "Profil", "Profile")} }
+                span { {text(language, MessageId::AppQuickStrip002)} }
                 strong { "{profile}" }
             }
             MetricPill {
@@ -2687,9 +2773,9 @@ fn QuickStrip(telemetry: Telemetry, profile: String, language: Language) -> Elem
                 level: temperature_level(telemetry.gpu_temperature_c),
             }
             MetricPill {
-                label: tr(language, "ZÁTĚŽ", "LOAD"),
+                label: text(language, MessageId::CommonLoad),
                 value: if telemetry.gpu_sleeping {
-                    tr(language, "Spí", "Sleeping").to_string()
+                    text(language, MessageId::CommonSleeping).to_string()
                 } else {
                     percent(telemetry.gpu_load_percent)
                 },
@@ -2700,9 +2786,9 @@ fn QuickStrip(telemetry: Telemetry, profile: String, language: Language) -> Elem
 }
 
 #[component]
-fn CoolingOverview(telemetry: Telemetry) -> Element {
+fn CoolingOverview(telemetry: Telemetry, language: Language) -> Element {
     rsx! {
-        section { class: "gauge-grid", "aria-label": "Cooling telemetry",
+        section { class: "gauge-grid", "aria-label": text(language, MessageId::CoolingTelemetry),
             FanGauge {
                 kind: "CPU",
                 rpm: telemetry.cpu_fan_rpm,
@@ -2855,10 +2941,10 @@ fn lighting_request(
 
 fn lighting_target_label(target: CapabilityLightingTarget, language: Language) -> &'static str {
     match target {
-        CapabilityLightingTarget::Keyboard => tr(language, "Klávesnice", "Keyboard"),
-        CapabilityLightingTarget::CoverLogo => tr(language, "Logo víka", "Cover logo"),
-        CapabilityLightingTarget::RearLogo => tr(language, "Zadní logo", "Rear logo"),
-        CapabilityLightingTarget::Lightbar => tr(language, "Světelná lišta", "Lightbar"),
+        CapabilityLightingTarget::Keyboard => text(language, MessageId::CommonKeyboard),
+        CapabilityLightingTarget::CoverLogo => text(language, MessageId::AppLightingTargetLabel001),
+        CapabilityLightingTarget::RearLogo => text(language, MessageId::AppLightingTargetLabel002),
+        CapabilityLightingTarget::Lightbar => text(language, MessageId::AppLightingTargetLabel003),
     }
 }
 
@@ -2872,7 +2958,7 @@ fn ControlDock(
     capabilities: Option<ControlCapabilities>,
     lighting: KeyboardLightingState,
     last_applied_lighting: Vec<LightingApplyRequest>,
-    lighting_error: Option<String>,
+    lighting_error: Option<RawDetail>,
     control_busy: bool,
     controls_enabled: bool,
     health: HealthState,
@@ -2981,21 +3067,11 @@ fn ControlDock(
         .as_ref()
         .and_then(|capabilities| capabilities.profiles.backend)
     {
-        Some(CapabilityProfileBackend::Kernel) => tr(
-            language,
-            "Volby profilů poskytuje živé rozhraní Linux kernelu.",
-            "Profile choices come from the live Linux kernel interface.",
-        ),
-        Some(CapabilityProfileBackend::AcerGamingWmi) => tr(
-            language,
-            "Známé příkazy Acer Gaming-WMI; každá změna se ověřuje zpětným čtením.",
-            "Known Acer Gaming-WMI commands; every change is verified by readback.",
-        ),
-        None => tr(
-            language,
-            "Firmware profily nejsou dostupné.",
-            "Firmware profiles are unavailable.",
-        ),
+        Some(CapabilityProfileBackend::Kernel) => text(language, MessageId::AppControlDock001),
+        Some(CapabilityProfileBackend::AcerGamingWmi) => {
+            text(language, MessageId::AppControlDock002)
+        }
+        None => text(language, MessageId::AppControlDock003),
     };
     let fan_capabilities = capabilities
         .as_ref()
@@ -3027,7 +3103,7 @@ fn ControlDock(
     let neon_device = lighting_device_id;
     let lighting_control_label = keyboard_device
         .as_ref()
-        .map_or(tr(language, "Podsvícení", "Backlight"), |device| {
+        .map_or(text(language, MessageId::AppControlDock004), |device| {
             lighting_target_label(device.target, language)
         });
     let lighting_state_readable = keyboard_device
@@ -3058,20 +3134,20 @@ fn ControlDock(
             .unwrap_or_default()
     };
     let lighting_state_label = if lighting_state_readable {
-        tr(language, "Stav z firmware", "Firmware state")
+        text(language, MessageId::AppControlDock005)
     } else if lighting_state_last_applied {
-        tr(language, "Naposledy použito", "Last applied")
+        text(language, MessageId::AppControlDock006)
     } else {
-        tr(language, "Stav neznámý", "State unknown")
+        text(language, MessageId::AppControlDock007)
     };
 
     rsx! {
-        section { class: "control-dock", "aria-label": tr(language, "Ovládací centrum", "Control center"),
+        section { class: "control-dock", "aria-label": text(language, MessageId::AppControlDock008),
             div {
                 class: "profile-switch",
                 style: "grid-template-columns:repeat({profile_count},minmax(0,1fr))",
                 title: profile_source_hint,
-                "aria-label": tr(language, "Výkonnostní profil Acer", "Acer performance profile"),
+                "aria-label": text(language, MessageId::AppControlDock009),
                 for choice in profile_choices {
                     button {
                         class: if selected_profile_raw == choice.raw { "profile active" } else { "profile" },
@@ -3096,7 +3172,7 @@ fn ControlDock(
                     role: "tab",
                     "aria-selected": dock_tab() == DockTab::Fans,
                     onclick: move |_| dock_tab.set(DockTab::Fans),
-                    {tr(language, "Ventilátory", "Fans")}
+                    {text(language, MessageId::AppControlDock010)}
                 }
                 if lighting_devices.is_empty() {
                     button {
@@ -3105,13 +3181,13 @@ fn ControlDock(
                         role: "tab",
                         "aria-selected": dock_tab() == DockTab::Keyboard,
                         disabled: !lighting_available,
-                        title: lighting_error.as_deref().unwrap_or(if lighting_available {
-                            tr(language, "RGB klávesnice", "RGB keyboard")
+                        title: lighting_error.as_ref().map(RawDetail::as_str).unwrap_or(if lighting_available {
+                            text(language, MessageId::AppControlDock011)
                         } else {
-                            tr(language, "RGB modul není dostupný", "RGB module is unavailable")
+                            text(language, MessageId::AppControlDock012)
                         }),
                         onclick: move |_| dock_tab.set(DockTab::Keyboard),
-                        {tr(language, "Klávesnice", "Keyboard")}
+                        {text(language, MessageId::CommonKeyboard)}
                     }
                 } else {
                     for (index, device) in lighting_devices.iter().enumerate() {
@@ -3139,7 +3215,7 @@ fn ControlDock(
             div { class: "dock-content",
                 if dock_tab() == DockTab::Keyboard {
                     div { class: "keyboard-panel",
-                        div { class: "lighting-power", "aria-label": tr(language, "Napájení podsvícení klávesnice", "Keyboard backlight power"),
+                        div { class: "lighting-power", "aria-label": text(language, MessageId::AppControlDock013),
                             div { class: "lighting-label",
                                 span { "{lighting_control_label}" }
                                 small { "{lighting_state_label}" }
@@ -3170,7 +3246,7 @@ fn ControlDock(
                                             }
                                         }
                                     },
-                                    {tr(language, "Zap", "On")}
+                                    {text(language, MessageId::CommonOn)}
                                 }
                                 button {
                                     class: if lighting_state_known && !displayed_lighting_power { "active" } else { "" },
@@ -3197,7 +3273,7 @@ fn ControlDock(
                                             }
                                         }
                                     },
-                                    {tr(language, "Vyp", "Off")}
+                                    {text(language, MessageId::CommonOff)}
                                 }
                             }
                         }
@@ -3241,7 +3317,7 @@ fn ControlDock(
                         }
                         if show_brightness {
                             label { class: "light-slider",
-                                span { {tr(language, "Jas", "Brightness")} }
+                                span { {text(language, MessageId::CommonBrightness)} }
                                 input {
                                     r#type: "range",
                                     min: "1",
@@ -3283,7 +3359,7 @@ fn ControlDock(
                                                 ));
                                             }
                                         },
-                                        {tr(language, "Statické", "Static")}
+                                        {text(language, MessageId::AppControlDock014)}
                                     }
                                 }
                                 if show_breathing {
@@ -3305,7 +3381,7 @@ fn ControlDock(
                                                 ));
                                             }
                                         },
-                                        {tr(language, "Dech", "Breathing")}
+                                        {text(language, MessageId::AppControlDock015)}
                                     }
                                 }
                                 if show_neon {
@@ -3327,7 +3403,7 @@ fn ControlDock(
                                                 ));
                                             }
                                         },
-                                        {tr(language, "Neon", "Neon")}
+                                        {text(language, MessageId::AppControlDock016)}
                                     }
                                 }
                             }
@@ -3336,7 +3412,7 @@ fn ControlDock(
                 } else {
                     div { class: if manual { "fan-panel manual" } else { "fan-panel" },
                         if fan_control_available {
-                            div { class: "mode-switch", "aria-label": tr(language, "Režim ventilátorů", "Fan mode"),
+                            div { class: "mode-switch", "aria-label": text(language, MessageId::AppControlDock017),
                                 for mode in supported_fan_modes {
                                     button {
                                         class: if mode == selected_fan_mode { "mode active" } else { "mode" },
@@ -3382,7 +3458,7 @@ fn ControlDock(
                                             gpu_percent: gpu_draft(),
                                         });
                                     },
-                                    {tr(language, "Použít", "Apply")}
+                                    {text(language, MessageId::CommonApply)}
                                 }
                             }
                         } else {
@@ -3397,23 +3473,11 @@ fn ControlDock(
                                 }
                                 strong {
                                     if !fan_control_available {
-                                        {tr(
-                                            language,
-                                            "Řízení ventilátorů není dostupné",
-                                            "Fan control unavailable",
-                                        )}
+                                        {text(language, MessageId::AppControlDock018)}
                                     } else if selected_fan_mode == FanMode::Maximum {
-                                        {tr(
-                                            language,
-                                            "Vybrány maximální otáčky ventilátorů",
-                                            "Maximum fan RPM selected",
-                                        )}
+                                        {text(language, MessageId::AppControlDock019)}
                                     } else {
-                                        {tr(
-                                            language,
-                                            "Vybráno automatické řízení otáček",
-                                            "Automatic RPM control selected",
-                                        )}
+                                        {text(language, MessageId::AppControlDock020)}
                                     }
                                 }
                             }
@@ -3429,6 +3493,7 @@ fn ControlDock(
 fn StatusBar(
     telemetry: Telemetry,
     status_message: String,
+    displayed_status: String,
     health: HealthState,
     language: Language,
 ) -> Element {
@@ -3437,7 +3502,6 @@ fn StatusBar(
         HealthState::Applying => "status-line applying",
         HealthState::Warning => "status-line warning",
     };
-    let displayed_status = compact_status(language, &status_message);
     rsx! {
         footer { class,
             span { class: "status-text", title: "{status_message}", "{displayed_status}" }
@@ -3483,10 +3547,10 @@ fn SettingToggle(
 
 fn setting_toggle_text(value: Option<bool>, read_failed: bool, language: Language) -> &'static str {
     match value {
-        Some(true) => tr(language, "Zap", "On"),
-        Some(false) => tr(language, "Vyp", "Off"),
-        None if read_failed => tr(language, "Chyba čtení", "Read error"),
-        None => tr(language, "Nepodporováno", "Unsupported"),
+        Some(true) => text(language, MessageId::CommonOn),
+        Some(false) => text(language, MessageId::CommonOff),
+        None if read_failed => text(language, MessageId::CommonReadError),
+        None => text(language, MessageId::CommonUnsupported),
     }
 }
 
@@ -3541,12 +3605,12 @@ fn AdvancedPanel(
     let throttle_label = if telemetry.gpu_sleeping || telemetry_error.is_some() {
         "NVIDIA"
     } else {
-        tr(language, "Důvody omezení taktu", "Clock / throttle reasons")
+        text(language, MessageId::AppAdvancedPanel001)
     };
     let throttle_summary = if telemetry.gpu_sleeping {
-        tr(language, "Spí", "Sleeping").to_string()
+        text(language, MessageId::CommonSleeping).to_string()
     } else if telemetry_error.is_some() {
-        tr(language, "Chyba čtení", "Readback error").to_string()
+        text(language, MessageId::AppAdvancedPanel002).to_string()
     } else {
         throttle
     };
@@ -3556,7 +3620,7 @@ fn AdvancedPanel(
         telemetry_error.unwrap_or("")
     };
     let gpu_workload = if telemetry.gpu_sleeping {
-        tr(language, "Spí", "Sleeping").to_string()
+        text(language, MessageId::CommonSleeping).to_string()
     } else {
         percent(telemetry.gpu_load_percent)
     };
@@ -3588,7 +3652,7 @@ fn AdvancedPanel(
     };
 
     rsx! {
-        aside { class: "advanced-panel", "aria-label": tr(language, "Rozšířené systémové informace", "Advanced system information"),
+        aside { class: "advanced-panel", "aria-label": text(language, MessageId::AppAdvancedPanel003),
             div { class: "advanced-heading",
                 div { class: "advanced-tabs", role: "tablist",
                     button {
@@ -3596,21 +3660,21 @@ fn AdvancedPanel(
                         role: "tab",
                         "aria-selected": tab() == AdvancedTab::Metrics,
                         onclick: move |_| tab.set(AdvancedTab::Metrics),
-                        {tr(language, "Metriky", "Metrics")}
+                        {text(language, MessageId::AppAdvancedPanel004)}
                     }
                     button {
                         class: if tab() == AdvancedTab::Hardware { "active" } else { "" },
                         role: "tab",
                         "aria-selected": tab() == AdvancedTab::Hardware,
                         onclick: move |_| tab.set(AdvancedTab::Hardware),
-                        {tr(language, "Hardware", "Hardware")}
+                        {text(language, MessageId::AppAdvancedPanel005)}
                     }
                     button {
                         class: if tab() == AdvancedTab::Platform { "active" } else { "" },
                         role: "tab",
                         "aria-selected": tab() == AdvancedTab::Platform,
                         onclick: move |_| tab.set(AdvancedTab::Platform),
-                        {tr(language, "Zařízení", "Device")}
+                        {text(language, MessageId::AppAdvancedPanel006)}
                     }
                 }
             }
@@ -3619,7 +3683,7 @@ fn AdvancedPanel(
                 div { class: "advanced-content metrics-content",
                 div { class: "advanced-kpis",
                 AdvancedMetric {
-                    label: tr(language, "Zátěž CPU", "CPU workload"),
+                    label: text(language, MessageId::AppAdvancedPanel007),
                     value: percent(telemetry.cpu_load_percent),
                     detail: temperature(telemetry.cpu_temperature_c),
                 }
@@ -3629,7 +3693,7 @@ fn AdvancedPanel(
                     detail: percent(ratio_percent(telemetry.memory_used_mib, telemetry.memory_total_mib)),
                 }
                 AdvancedMetric {
-                    label: tr(language, "Zátěž GPU", "GPU workload"),
+                    label: text(language, MessageId::AppAdvancedPanel008),
                     value: gpu_workload,
                     detail: gpu_workload_detail,
                 }
@@ -3644,17 +3708,17 @@ fn AdvancedPanel(
                     detail: gpu_offset_detail("VF/GPC", telemetry.gpu_core_offset_mhz),
                 }
                 AdvancedMetric {
-                    label: tr(language, "Takt VRAM", "VRAM clock"),
+                    label: text(language, MessageId::CommonVramClock),
                     value: frequency(telemetry.gpu_memory_clock_mhz),
                     detail: gpu_offset_detail("VF MEM", telemetry.gpu_memory_offset_mhz),
                 }
                 AdvancedMetric {
-                    label: tr(language, "Příkon GPU", "GPU power"),
+                    label: text(language, MessageId::AppAdvancedPanel009),
                     value: power(telemetry.gpu_power_w),
                     detail: format!("LIMIT {}", power(telemetry.gpu_enforced_power_limit_w)),
                 }
                 AdvancedMetric {
-                    label: tr(language, "Chlazení", "Cooling"),
+                    label: text(language, MessageId::AppAdvancedPanel010),
                     value: format!("{}/{} RPM", optional_u32(telemetry.cpu_fan_rpm), optional_u32(telemetry.gpu_fan_rpm)),
                     detail: cooling_detail,
                 }
@@ -3663,7 +3727,7 @@ fn AdvancedPanel(
                 div { class: "advanced-charts",
                 DualHistoryChart {
                     language,
-                    title: tr(language, "Systémová zátěž", "System load"),
+                    title: text(language, MessageId::AppAdvancedPanel011),
                     primary_label: "CPU",
                     primary_value: percent(telemetry.cpu_load_percent),
                     primary_points: cpu_load_points,
@@ -3689,7 +3753,7 @@ fn AdvancedPanel(
                 }
                 DualHistoryChart {
                     language,
-                    title: tr(language, "Teploty", "Temperatures"),
+                    title: text(language, MessageId::AppAdvancedPanel012),
                     primary_label: "CPU",
                     primary_value: temperature(telemetry.cpu_temperature_c),
                     primary_points: cpu_temperature_points,
@@ -3702,11 +3766,11 @@ fn AdvancedPanel(
                 }
                 DualHistoryChart {
                     language,
-                    title: tr(language, "Příkon GPU / limit", "GPU power / limit"),
-                    primary_label: tr(language, "PŘÍKON", "POWER"),
+                    title: text(language, MessageId::AppAdvancedPanel013),
+                    primary_label: text(language, MessageId::AppAdvancedPanel014),
                     primary_value: power(telemetry.gpu_power_w),
                     primary_points: gpu_power_points,
-                    secondary_label: tr(language, "LIMIT", "LIMIT"),
+                    secondary_label: text(language, MessageId::AppAdvancedPanel015),
                     secondary_value: power(telemetry.gpu_enforced_power_limit_w),
                     secondary_points: gpu_power_limit_points,
                     y_min: "0 W".to_string(),
@@ -3715,7 +3779,7 @@ fn AdvancedPanel(
                 }
                 DualHistoryChart {
                     language,
-                    title: tr(language, "Domény taktu GPU", "GPU clock domains"),
+                    title: text(language, MessageId::AppAdvancedPanel016),
                     primary_label: "GFX / 3 GHz",
                     primary_value: frequency(telemetry.gpu_graphics_clock_mhz),
                     primary_points: graph_points(&history, |point| point.gpu_graphics_clock_mhz, 3_000.0),
@@ -3759,7 +3823,7 @@ fn AdvancedPanel(
 
 #[component]
 fn HardwarePanel(language: Language, info: HardwareInfo) -> Element {
-    let unknown = tr(language, "Nezjištěno", "Unavailable");
+    let unknown = text(language, MessageId::AppHardwarePanel001);
     let cpu_model = info.cpu.model.as_deref().unwrap_or(unknown).to_string();
     let gpu_model = info.gpu.model.as_deref().unwrap_or(unknown).to_string();
     let memory_type = info
@@ -3779,42 +3843,42 @@ fn HardwarePanel(language: Language, info: HardwareInfo) -> Element {
                 div { class: "hardware-card-heading",
                     div {
                         span { class: "hardware-kind", "CPU" }
-                        h3 { {tr(language, "Procesor", "Processor")} }
+                        h3 { {text(language, MessageId::AppHardwarePanel002)} }
                     }
-                    span { class: "read-only-badge", {tr(language, "Jen čtení", "Read only")} }
+                    span { class: "read-only-badge", {text(language, MessageId::CommonReadOnly)} }
                 }
                 div { class: "hardware-model", title: "{cpu_model}", "{cpu_model}" }
                 div { class: "hardware-facts",
                     HardwareFact {
-                        label: tr(language, "Aktivní jádra", "Active cores"),
+                        label: text(language, MessageId::AppHardwarePanel003),
                         value: optional_hardware_number(info.cpu.physical_cores),
                     }
                     HardwareFact {
-                        label: tr(language, "Online vlákna", "Online threads"),
+                        label: text(language, MessageId::AppHardwarePanel004),
                         value: optional_hardware_number(info.cpu.logical_processors),
                     }
                     HardwareFact {
-                        label: tr(language, "Aktivní P / E", "Active P / E cores"),
+                        label: text(language, MessageId::AppHardwarePanel005),
                         value: core_mix,
                     }
                     HardwareFact {
-                        label: tr(language, "Architektura", "Architecture"),
+                        label: text(language, MessageId::AppHardwarePanel006),
                         value: info.cpu.architecture.as_deref().unwrap_or("—").to_string(),
                     }
                     HardwareFact {
-                        label: tr(language, "Rodina CPU", "CPU family"),
+                        label: text(language, MessageId::AppHardwarePanel007),
                         value: optional_hardware_number(info.cpu.family),
                     }
                     HardwareFact {
-                        label: "L3 cache",
+                        label: text(language, MessageId::HardwareL3Cache),
                         value: hardware_cache(info.cpu.l3_cache_kib),
                     }
                     HardwareFact {
-                        label: tr(language, "Aktuální takt", "Current clock"),
+                        label: text(language, MessageId::AppHardwarePanel008),
                         value: hardware_frequency(info.cpu.current_frequency_mhz),
                     }
                     HardwareFact {
-                        label: tr(language, "Maximální takt", "Maximum clock"),
+                        label: text(language, MessageId::AppHardwarePanel009),
                         value: hardware_frequency(info.cpu.maximum_frequency_mhz),
                     }
                 }
@@ -3824,9 +3888,9 @@ fn HardwarePanel(language: Language, info: HardwareInfo) -> Element {
                 div { class: "hardware-card-heading",
                     div {
                         span { class: "hardware-kind", "GPU" }
-                        h3 { {tr(language, "Grafika", "Graphics")} }
+                        h3 { {text(language, MessageId::AppHardwarePanel010)} }
                     }
-                    span { class: "read-only-badge", {tr(language, "Jen čtení", "Read only")} }
+                    span { class: "read-only-badge", {text(language, MessageId::CommonReadOnly)} }
                 }
                 div { class: "hardware-model", title: "{gpu_model}", "{gpu_model}" }
                 div { class: "hardware-facts",
@@ -3835,7 +3899,7 @@ fn HardwarePanel(language: Language, info: HardwareInfo) -> Element {
                         value: hardware_capacity(info.gpu.vram_total_mib),
                     }
                     HardwareFact {
-                        label: tr(language, "Ovladač", "Driver"),
+                        label: text(language, MessageId::AppHardwarePanel011),
                         value: info.gpu.driver_version.as_deref().unwrap_or("—").to_string(),
                     }
                     HardwareFact {
@@ -3850,19 +3914,19 @@ fn HardwarePanel(language: Language, info: HardwareInfo) -> Element {
                         ),
                     }
                     HardwareFact {
-                        label: tr(language, "Grafický takt", "Graphics clock"),
+                        label: text(language, MessageId::AppHardwarePanel012),
                         value: hardware_frequency(info.gpu.current_graphics_clock_mhz),
                     }
                     HardwareFact {
-                        label: "GPU max",
+                        label: text(language, MessageId::HardwareGpuMaximum),
                         value: hardware_frequency(info.gpu.maximum_graphics_clock_mhz),
                     }
                     HardwareFact {
-                        label: tr(language, "Takt VRAM", "VRAM clock"),
+                        label: text(language, MessageId::CommonVramClock),
                         value: hardware_frequency(info.gpu.current_memory_clock_mhz),
                     }
                     HardwareFact {
-                        label: "VRAM max",
+                        label: text(language, MessageId::HardwareVramMaximum),
                         value: hardware_frequency(info.gpu.maximum_memory_clock_mhz),
                     }
                 }
@@ -3872,39 +3936,35 @@ fn HardwarePanel(language: Language, info: HardwareInfo) -> Element {
                 div { class: "hardware-card-heading",
                     div {
                         span { class: "hardware-kind", "RAM" }
-                        h3 { {tr(language, "Systémová paměť", "System memory")} }
+                        h3 { {text(language, MessageId::AppHardwarePanel013)} }
                     }
-                    span { class: "read-only-badge", {tr(language, "Jen čtení", "Read only")} }
+                    span { class: "read-only-badge", {text(language, MessageId::CommonReadOnly)} }
                 }
                 div { class: "hardware-facts memory-facts",
                     HardwareFact {
-                        label: tr(language, "Celkem", "Total"),
+                        label: text(language, MessageId::AppHardwarePanel014),
                         value: hardware_capacity(info.memory.total_mib),
                     }
                     HardwareFact {
-                        label: tr(language, "Typ", "Type"),
+                        label: text(language, MessageId::AppHardwarePanel015),
                         value: memory_type,
                     }
                     HardwareFact {
-                        label: tr(language, "Rychlost", "Speed"),
+                        label: text(language, MessageId::AppHardwarePanel016),
                         value: info.memory.speed_mt_s.map(|value| format!("{value} MT/s")).unwrap_or_else(|| "—".to_string()),
                     }
                     HardwareFact {
-                        label: tr(language, "Kanály", "Channels"),
+                        label: text(language, MessageId::AppHardwarePanel017),
                         value: optional_hardware_number(info.memory.channels),
                     }
                     HardwareFact {
-                        label: tr(language, "Moduly", "Modules"),
+                        label: text(language, MessageId::AppHardwarePanel018),
                         value: optional_hardware_number(info.memory.modules),
                     }
                 }
             }
             p { class: "hardware-note",
-                {tr(
-                    language,
-                    "Data pouze pro čtení z kernelu a firmware; nedostupné hodnoty se neodhadují.",
-                    "Read-only kernel and firmware data; unavailable values are not inferred.",
-                )}
+                {text(language, MessageId::AppHardwarePanel019)}
             }
         }
     }
@@ -3987,24 +4047,19 @@ fn PlatformAdvanced(
     language: Language,
     on_action: EventHandler<PlatformAction>,
 ) -> Element {
-    let unavailable_message = error.clone().unwrap_or_else(|| {
-        tr(
-            language,
-            "Čekám na firmware readback",
-            "Waiting for firmware readback",
-        )
-        .to_string()
-    });
+    let unavailable_message = error
+        .clone()
+        .unwrap_or_else(|| text(language, MessageId::AppPlatformAdvanced001).to_string());
     let Some(state) = state else {
         return rsx! {
             section { class: "advanced-content platform-page empty",
-                h3 { {tr(language, "Platformní funkce nejsou načtené", "Platform features are not loaded")} }
+                h3 { {text(language, MessageId::AppPlatformAdvanced002)} }
                 p { "{unavailable_message}" }
                 button {
                     class: "apply-button",
                     disabled: busy,
                     onclick: move |_| on_action.call(PlatformAction::Refresh),
-                    {tr(language, "Načíst znovu", "Reload")}
+                    {text(language, MessageId::AppPlatformAdvanced003)}
                 }
             }
         };
@@ -4034,70 +4089,49 @@ fn PlatformAdvanced(
     let calibration_active = state.battery_calibration.unwrap_or(false);
     let calibration_read_failed = state.read_error_mask & READ_ERROR_BATTERY_CALIBRATION != 0;
     let calibration_button_text = match state.battery_calibration {
-        Some(true) => tr(language, "Zastavit", "Stop"),
-        Some(false) => tr(language, "Spustit", "Start"),
-        None if calibration_read_failed => tr(language, "Chyba čtení", "Read error"),
-        None => tr(language, "Nepodporováno", "Unsupported"),
+        Some(true) => text(language, MessageId::AppPlatformAdvanced004),
+        Some(false) => text(language, MessageId::AppPlatformAdvanced005),
+        None if calibration_read_failed => text(language, MessageId::CommonReadError),
+        None => text(language, MessageId::CommonUnsupported),
     };
     let battery_live = battery_live_status(battery_status, battery_percent, language);
     let calibration_detail = if calibration_active {
         format!(
             "{} · {battery_live}",
-            tr(language, "Kalibrace aktivní", "Calibration active")
+            text(language, MessageId::AppPlatformAdvanced006)
         )
     } else {
-        tr(
-            language,
-            "Firmware plný cyklus baterie",
-            "Firmware full battery cycle",
-        )
-        .to_string()
+        text(language, MessageId::AppPlatformAdvanced007).to_string()
     };
     let usb_only = usb_power_online == Some(true) && ac_online != Some(true);
     let calibration_start_allowed = ac_online == Some(true) && !usb_only;
     let (power_state_class, power_state_text) = if ac_online == Some(true) {
         (
             "calibration-power-state ready",
-            tr(
-                language,
-                "AC napájení je připojené. Ponech adaptér připojený po celý cyklus.",
-                "AC power is connected. Keep the adapter connected for the entire cycle.",
-            ),
+            text(language, MessageId::AppPlatformAdvanced008),
         )
     } else if usb_only {
         (
             "calibration-power-state warning",
-            tr(
-                language,
-                "ASense z bezpečnostních důvodů nespustí kalibraci jen přes USB-C. Připoj AC adaptér.",
-                "ASense does not start calibration on USB-C-only power as a safety policy. Connect an AC adapter.",
-            ),
+            text(language, MessageId::AppPlatformAdvanced009),
         )
     } else if ac_online == Some(false) {
         (
             "calibration-power-state warning",
-            tr(
-                language,
-                "AC adaptér je odpojený. Před startem jej připoj.",
-                "The AC adapter is disconnected. Connect it before starting.",
-            ),
+            text(language, MessageId::AppPlatformAdvanced010),
         )
     } else {
         (
             "calibration-power-state warning",
-            tr(
-                language,
-                "Stav AC nelze ověřit. Před startem připoj adaptér a ponech jej připojený.",
-                "AC state could not be verified. Connect an adapter and keep it connected.",
-            ),
+            text(language, MessageId::AppPlatformAdvanced011),
         )
     };
     let readback_text = if busy {
-        tr(language, "Ověřuji", "Verifying")
+        text(language, MessageId::AppPlatformAdvanced012)
     } else if error.is_some() || state.read_error_mask != 0 {
-        tr(language, "Chyba čtení", "Read error")
+        text(language, MessageId::CommonReadError)
     } else {
-        tr(language, "Ověřeno", "Verified")
+        text(language, MessageId::AppPlatformAdvanced013)
     };
     let readback_class = if error.is_some() || state.read_error_mask != 0 {
         "platform-readback warning"
@@ -4111,8 +4145,8 @@ fn PlatformAdvanced(
             div { class: "device-bento",
                 SettingToggle {
                     class_name: "device-battery-limit",
-                    label: tr(language, "Limit baterie", "Battery limit"),
-                    detail: tr(language, "Max. 80 %", "Maximum 80%"),
+                    label: text(language, MessageId::AppPlatformAdvanced014),
+                    detail: text(language, MessageId::AppPlatformAdvanced015),
                     value: state.battery_limit,
                     read_failed: state.read_error_mask & READ_ERROR_BATTERY_LIMIT != 0,
                     disabled: busy,
@@ -4121,8 +4155,8 @@ fn PlatformAdvanced(
                 }
                 div { class: "usb-charging-control device-usb-charging",
                     div { class: "setting-copy",
-                        strong { {tr(language, "USB při vypnutí", "USB while powered off")} }
-                        span { {tr(language, "Vypnout při kapacitě", "Stop at battery level")} }
+                        strong { {text(language, MessageId::AppPlatformAdvanced016)} }
+                        span { {text(language, MessageId::AppPlatformAdvanced017)} }
                     }
                     div { class: "usb-thresholds",
                         for mode in UsbCharging::ALL {
@@ -4137,7 +4171,7 @@ fn PlatformAdvanced(
                 }
                 div { class: "setting-toggle device-calibration",
                     div { class: "setting-copy",
-                        strong { {tr(language, "Kalibrace baterie", "Battery calibration")} }
+                        strong { {text(language, MessageId::AppPlatformAdvanced018)} }
                         span { "{calibration_detail}" }
                     }
                     button {
@@ -4155,8 +4189,8 @@ fn PlatformAdvanced(
                 }
                 SettingToggle {
                     class_name: "device-boot-sound",
-                    label: tr(language, "Zvuk při startu", "Boot sound"),
-                    detail: tr(language, "Zvuk Predator animace", "Predator boot animation sound"),
+                    label: text(language, MessageId::AppPlatformAdvanced019),
+                    detail: text(language, MessageId::AppPlatformAdvanced020),
                     value: state.boot_sound,
                     read_failed: state.read_error_mask & READ_ERROR_BOOT_SOUND != 0,
                     disabled: busy,
@@ -4165,8 +4199,8 @@ fn PlatformAdvanced(
                 }
                 SettingToggle {
                     class_name: "device-lcd-override",
-                    label: "LCD override",
-                    detail: tr(language, "Firmware override displeje", "Firmware display override"),
+                    label: text(language, MessageId::PlatformLcdOverride),
+                    detail: text(language, MessageId::AppPlatformAdvanced021),
                     value: state.lcd_override,
                     read_failed: state.read_error_mask & READ_ERROR_LCD_OVERRIDE != 0,
                     disabled: busy,
@@ -4175,8 +4209,8 @@ fn PlatformAdvanced(
                 }
                 SettingToggle {
                     class_name: "device-keyboard-timeout",
-                    label: tr(language, "Timeout klávesnice", "Keyboard timeout"),
-                    detail: tr(language, "Automatické zhasnutí RGB", "Automatic RGB timeout"),
+                    label: text(language, MessageId::AppPlatformAdvanced022),
+                    detail: text(language, MessageId::AppPlatformAdvanced023),
                     value: state.keyboard_timeout,
                     read_failed: state.read_error_mask & READ_ERROR_KEYBOARD_TIMEOUT != 0,
                     disabled: busy,
@@ -4186,8 +4220,8 @@ fn PlatformAdvanced(
                 article { class: "rear-logo-card",
                 div { class: "rear-logo-heading",
                     div { class: "setting-copy",
-                        strong { {tr(language, "Zadní Predator logo", "Rear Predator logo")} }
-                        span { {tr(language, "Napájení, barva a jas", "Power, color and brightness")} }
+                        strong { {text(language, MessageId::AppPlatformAdvanced024)} }
+                        span { {text(language, MessageId::AppPlatformAdvanced025)} }
                     }
                     div { class: "binary-buttons",
                         button {
@@ -4201,7 +4235,7 @@ fn PlatformAdvanced(
                                     logo_color(),
                                 )));
                             },
-                            {tr(language, "Zap", "On")}
+                            {text(language, MessageId::CommonOn)}
                         }
                         button {
                             class: if !logo_enabled() { "active" } else { "" },
@@ -4214,13 +4248,13 @@ fn PlatformAdvanced(
                                     logo_color(),
                                 )));
                             },
-                            {tr(language, "Vyp", "Off")}
+                            {text(language, MessageId::CommonOff)}
                         }
                     }
                 }
                 div { class: "rear-logo-editor",
                     label { class: "logo-color",
-                        span { {tr(language, "Barva", "Color")} }
+                        span { {text(language, MessageId::AppPlatformAdvanced026)} }
                         input {
                             r#type: "color",
                             value: "#{logo_color():06x}",
@@ -4249,7 +4283,7 @@ fn PlatformAdvanced(
                         }
                     }
                     label { class: "logo-brightness",
-                        span { {tr(language, "Jas", "Brightness")} }
+                        span { {text(language, MessageId::CommonBrightness)} }
                         input {
                             r#type: "range", min: "1", max: "100", step: "1",
                             value: "{logo_brightness}",
@@ -4273,18 +4307,18 @@ fn PlatformAdvanced(
                                 logo_color(),
                             )));
                         },
-                        {tr(language, "Použít", "Apply")}
+                        {text(language, MessageId::CommonApply)}
                     }
                 }
                 }
 
                 div { class: readback_class, title: "{readback_title}",
-                    span { "Firmware" }
+                    span { {text(language, MessageId::PlatformFirmware)} }
                     strong { "{readback_text}" }
                     button {
                         disabled: busy,
                         onclick: move |_| on_action.call(PlatformAction::Refresh),
-                        {tr(language, "Obnovit", "Refresh")}
+                        {text(language, MessageId::AppPlatformAdvanced027)}
                     }
                 }
             }
@@ -4297,33 +4331,21 @@ fn PlatformAdvanced(
                         "aria-labelledby": "calibration-modal-title",
                         "aria-describedby": "calibration-modal-description",
                         h3 { id: "calibration-modal-title",
-                            {tr(language, "Spustit kalibraci baterie?", "Start battery calibration?")}
+                            {text(language, MessageId::AppPlatformAdvanced028)}
                         }
                         p { id: "calibration-modal-description",
-                            {tr(
-                                language,
-                                "Firmware spustí dlouhý plný cyklus. Ulož práci; notebook během kalibrace nevypínej ani neuspávej.",
-                                "Firmware will start a long full cycle. Save your work; do not power off or suspend the laptop during calibration.",
-                            )}
+                            {text(language, MessageId::AppPlatformAdvanced029)}
                         }
                         div { class: power_state_class,
                             strong { "{power_state_text}" }
                             span { "{battery_live}" }
                         }
                         p { class: "calibration-modal-note",
-                            {tr(
-                                language,
-                                "Firmware neposkytuje procenta ani dekódovaný signál dokončení. Po cyklu stav obnov; zůstane-li aktivní, kalibraci ručně zastav.",
-                                "Firmware exposes no percentage or decoded completion signal. Refresh after the cycle; if it remains active, stop calibration manually.",
-                            )}
+                            {text(language, MessageId::AppPlatformAdvanced030)}
                         }
                         if state.battery_limit == Some(true) {
                             p { class: "calibration-modal-note",
-                                {tr(
-                                    language,
-                                    "Před kalibrací doporučujeme vypnout 80% limit nabíjení.",
-                                    "Disable the 80% charge limit before calibration.",
-                                )}
+                                {text(language, MessageId::AppPlatformAdvanced031)}
                             }
                         }
                         div { class: "calibration-modal-actions",
@@ -4331,7 +4353,7 @@ fn PlatformAdvanced(
                                 class: "modal-cancel",
                                 disabled: busy,
                                 onclick: move |_| calibration_confirmation.set(false),
-                                {tr(language, "Zrušit", "Cancel")}
+                                {text(language, MessageId::AppPlatformAdvanced032)}
                             }
                             button {
                                 class: "apply-button",
@@ -4340,7 +4362,7 @@ fn PlatformAdvanced(
                                     calibration_confirmation.set(false);
                                     on_action.call(PlatformAction::BatteryCalibration(true));
                                 },
-                                {tr(language, "Spustit kalibraci", "Start calibration")}
+                                {text(language, MessageId::AppPlatformAdvanced033)}
                             }
                         }
                     }
@@ -4356,11 +4378,11 @@ fn battery_live_status(
     language: Language,
 ) -> String {
     let state = match status {
-        Some(BatteryStatus::Charging) => tr(language, "nabíjení", "charging"),
-        Some(BatteryStatus::Discharging) => tr(language, "vybíjení", "discharging"),
-        Some(BatteryStatus::Full) => tr(language, "plná", "full"),
-        Some(BatteryStatus::NotCharging) => tr(language, "nenabíjí", "not charging"),
-        Some(BatteryStatus::Unknown) | None => tr(language, "stav neznámý", "state unknown"),
+        Some(BatteryStatus::Charging) => text(language, MessageId::AppBatteryLiveStatus001),
+        Some(BatteryStatus::Discharging) => text(language, MessageId::AppBatteryLiveStatus002),
+        Some(BatteryStatus::Full) => text(language, MessageId::AppBatteryLiveStatus003),
+        Some(BatteryStatus::NotCharging) => text(language, MessageId::AppBatteryLiveStatus004),
+        Some(BatteryStatus::Unknown) | None => text(language, MessageId::AppBatteryLiveStatus005),
     };
     percent.map_or_else(
         || state.to_string(),
@@ -4370,7 +4392,7 @@ fn battery_live_status(
 
 fn usb_charging_label(mode: UsbCharging, language: Language) -> &'static str {
     match mode {
-        UsbCharging::Disabled => tr(language, "Vyp", "Off"),
+        UsbCharging::Disabled => text(language, MessageId::CommonOff),
         UsbCharging::StopAt10Percent => "10 %",
         UsbCharging::StopAt20Percent => "20 %",
         UsbCharging::StopAt30Percent => "30 %",
@@ -4403,12 +4425,9 @@ fn DualHistoryChart(
     history_seconds: usize,
 ) -> Element {
     let history_start = format!("−{history_seconds} s");
-    let history_end = tr(language, "teď", "now");
-    let chart_description = if language == Language::Czech {
-        format!("Historie {title}, {history_seconds} sekund, osa {y_min} až {y_max}")
-    } else {
-        format!("History of {title}, {history_seconds} seconds, axis {y_min} to {y_max}")
-    };
+    let history_end = text(language, MessageId::AppDualHistoryChart001);
+    let chart_description =
+        history_chart_description(language, title, history_seconds, &y_min, &y_max);
     rsx! {
         article { class: "history-chart",
             div { class: "chart-heading",
@@ -4556,8 +4575,9 @@ fn ColorInput(
     on_change: EventHandler<u32>,
     on_commit: EventHandler<u32>,
 ) -> Element {
+    let title = color_zone_title(language, label);
     rsx! {
-        label { class: "color-input", title: if language == Language::Czech { format!("Zóna {label}") } else { format!("Zone {label}") },
+        label { class: "color-input", title: "{title}",
             input {
                 r#type: "color",
                 value: "#{value:06x}",
@@ -4582,6 +4602,42 @@ fn parse_color_value(value: &str) -> Option<u32> {
     (value.len() == 6)
         .then(|| u32::from_str_radix(value, 16).ok())
         .flatten()
+}
+
+fn history_chart_description(
+    language: Language,
+    title: &str,
+    history_seconds: usize,
+    y_min: &str,
+    y_max: &str,
+) -> String {
+    match language {
+        Language::Czech => {
+            format!("Historie {title}, {history_seconds} sekund, osa {y_min} až {y_max}")
+        }
+        Language::English => {
+            format!("History of {title}, {history_seconds} seconds, axis {y_min} to {y_max}")
+        }
+        Language::SimplifiedChinese => {
+            format!("{title}历史记录，{history_seconds} 秒，纵轴从 {y_min} 到 {y_max}")
+        }
+    }
+}
+
+fn color_zone_title(language: Language, index: usize) -> String {
+    match language {
+        Language::Czech => format!("Zóna {index}"),
+        Language::English => format!("Zone {index}"),
+        Language::SimplifiedChinese => format!("分区 {index}"),
+    }
+}
+
+fn unknown_clock_reason(language: Language, bits: u64) -> String {
+    match language {
+        Language::Czech => format!("Neznámý důvod 0x{bits:016x}"),
+        Language::English => format!("Unknown reason 0x{bits:016x}"),
+        Language::SimplifiedChinese => format!("未知原因 0x{bits:016x}"),
+    }
 }
 
 fn parse_lighting_state(response: &str) -> Result<KeyboardLightingState, String> {
@@ -4685,7 +4741,7 @@ fn offsets(
 ) -> String {
     match (core, memory, uniform) {
         (Some(core), Some(memory), Some(true)) => format!("{core:+}/{memory:+} MHz"),
-        (_, _, Some(false)) => tr(language, "smíšené", "mixed").to_string(),
+        (_, _, Some(false)) => text(language, MessageId::AppOffsets001).to_string(),
         _ => "--/--".to_string(),
     }
 }
@@ -4791,68 +4847,58 @@ fn has_real_throttle(reasons: Option<u64>) -> bool {
 
 fn clock_event_label(reasons: Option<u64>, language: Language) -> String {
     let Some(bits) = reasons else {
-        return tr(language, "Nedostupné", "Unavailable").to_string();
+        return text(language, MessageId::CommonUnavailable).to_string();
     };
     let reasons = ClockEventReasons::from_bits(bits);
     if bits == 0 {
-        return tr(language, "Žádné omezení", "No limits").to_string();
+        return text(language, MessageId::AppClockEventLabel001).to_string();
     }
     if bits == ClockEventReasons::GPU_IDLE {
-        return tr(
-            language,
-            "Žádné omezení · GPU nečinná",
-            "No limits · GPU idle",
-        )
-        .to_string();
+        return text(language, MessageId::AppClockEventLabel002).to_string();
     }
     let labels: Vec<&'static str> = [
         (
             ClockEventReasons::GPU_IDLE,
-            tr(language, "nečinnost", "idle"),
+            text(language, MessageId::AppClockEventLabel003),
         ),
         (
             ClockEventReasons::APPLICATION_CLOCKS,
-            tr(language, "aplikační takty", "application clocks"),
+            text(language, MessageId::AppClockEventLabel004),
         ),
         (
             ClockEventReasons::SOFTWARE_POWER_CAP,
-            tr(language, "softwarový limit příkonu", "software power cap"),
+            text(language, MessageId::AppClockEventLabel005),
         ),
         (
             ClockEventReasons::HARDWARE_SLOWDOWN,
-            tr(language, "hardwarové zpomalení", "hardware slowdown"),
+            text(language, MessageId::AppClockEventLabel006),
         ),
-        (ClockEventReasons::SYNC_BOOST, "sync boost"),
+        (
+            ClockEventReasons::SYNC_BOOST,
+            text(language, MessageId::ClockSyncBoost),
+        ),
         (
             ClockEventReasons::SOFTWARE_THERMAL,
-            tr(language, "softwarový tepelný limit", "software thermal"),
+            text(language, MessageId::AppClockEventLabel007),
         ),
         (
             ClockEventReasons::HARDWARE_THERMAL,
-            tr(language, "hardwarový tepelný limit", "hardware thermal"),
+            text(language, MessageId::AppClockEventLabel008),
         ),
         (
             ClockEventReasons::HARDWARE_POWER_BRAKE,
-            tr(
-                language,
-                "hardwarová výkonová brzda",
-                "hardware power brake",
-            ),
+            text(language, MessageId::AppClockEventLabel009),
         ),
         (
             ClockEventReasons::DISPLAY_CLOCK,
-            tr(language, "limit displeje", "display clock"),
+            text(language, MessageId::AppClockEventLabel010),
         ),
     ]
     .into_iter()
     .filter_map(|(bit, label)| reasons.contains(bit).then_some(label))
     .collect();
     if labels.is_empty() {
-        if language == Language::Czech {
-            format!("Neznámý důvod 0x{bits:016x}")
-        } else {
-            format!("Unknown reason 0x{bits:016x}")
-        }
+        unknown_clock_reason(language, bits)
     } else {
         labels.join(" · ")
     }
@@ -4865,21 +4911,24 @@ mod tests {
         ControlAction, ControlOutcome, ControlRequest, ControlResultSlot, ControlUpdate, FanMode,
         HardwareProfile, HealthState, KeyboardLightingState, Language, LightingApplyRequest,
         MAX_LIGHTING_ZONES, MIN_WINDOW_HEIGHT, PROFILE_SYNC_GRACE_SAMPLES, PlatformAction,
-        PlatformProfile, ResizeObservation, RuntimeState, TELEMETRY_HISTORY_CAPACITY,
-        TITLEBAR_DESIGN_HEIGHT, TelemetryHistory, TelemetryPoint, TelemetrySlot, TelemetryUpdate,
+        PlatformIssue, PlatformProfile, PlatformReadErrorSet, ResizeObservation, RuntimeState,
+        TELEMETRY_HISTORY_CAPACITY, TITLEBAR_DESIGN_HEIGHT, TelemetryHealth, TelemetryHistory,
+        TelemetryPoint, TelemetrySlot, TelemetryUpdate, UiDiagnostic, UiErrorKind, UiStatus,
         WORKSPACE_DESIGN_HEIGHT, apply_capability_snapshot, apply_control_update, apply_telemetry,
-        aspect_constrained_size, begin_control_request, compact_status, empty_platform_state,
-        gpu_offset_detail, graph_points, keyboard_editor_readback, lighting_apply_status,
-        lighting_draft_for_device, lighting_mode_visibility, lighting_zone_draft, localized_status,
-        logical_window_size, merge_privileged_memory, parse_color_value, parse_lighting_state,
-        physical_size_close, power_usage_limit, preferred_lighting_index, rear_logo_state,
-        reconcile_profile_telemetry, setting_toggle_text, telemetry_retry_delay,
-        workspace_aspect_ratio,
+        aspect_constrained_size, begin_control_request, color_zone_title, empty_platform_state,
+        gpu_offset_detail, graph_points, history_chart_description, keyboard_editor_readback,
+        lighting_apply_status, lighting_draft_for_device, lighting_mode_visibility,
+        lighting_zone_draft, logical_window_size, merge_privileged_memory, parse_color_value,
+        parse_lighting_state, physical_size_close, power_usage_limit, preferred_lighting_index,
+        rear_logo_state, reconcile_profile_telemetry, render_compact_status,
+        render_platform_fields, render_telemetry_status, render_ui_status, setting_toggle_text,
+        telemetry_retry_delay, unknown_clock_reason, workspace_aspect_ratio,
     };
     use crate::control::{
         CapabilityLightingBackend, CapabilityLightingTarget, ControlCapabilities,
         ControlFanCapabilities, ControlLightingDevice, ControlLightingMode, ControlLightingModes,
         ControlPlatformCapabilities, ControlProfileCapabilities, ProfileApplyReceipt,
+        ProfilePowerReceipt,
     };
     use crate::hardware::{FanChannelState, FanMode as HardwareFanMode, FanRpmChannel, FanState};
     use crate::telemetry::{
@@ -4910,7 +4959,11 @@ mod tests {
         assert!(runtime.view.control_busy);
         assert!(!runtime.view.controls_enabled);
         assert_eq!(runtime.view.health, HealthState::Applying);
-        assert_eq!(runtime.view.status_message, "Připojuji ovládání");
+        assert_eq!(runtime.view.status, UiStatus::ConnectingControls);
+        assert_eq!(
+            render_ui_status(Language::Czech, &runtime.view.status),
+            "Připojuji ovládání"
+        );
     }
 
     #[test]
@@ -4918,7 +4971,8 @@ mod tests {
         let language = Language::default();
 
         assert_eq!(language, Language::English);
-        assert_eq!(language.code(), "EN");
+        assert_eq!(language.code(), "en");
+        assert_eq!(language.display_code(), "EN");
         assert_eq!(language.html_code(), "en");
     }
 
@@ -5119,6 +5173,335 @@ mod tests {
     }
 
     #[test]
+    fn typed_localized_formatters_preserve_fields_in_all_three_locales() {
+        assert_eq!(color_zone_title(Language::Czech, 3), "Zóna 3");
+        assert_eq!(color_zone_title(Language::English, 3), "Zone 3");
+        assert_eq!(color_zone_title(Language::SimplifiedChinese, 3), "分区 3");
+        assert_eq!(
+            history_chart_description(Language::Czech, "Teploty", 60, "0 °C", "100 °C"),
+            "Historie Teploty, 60 sekund, osa 0 °C až 100 °C"
+        );
+        assert_eq!(
+            history_chart_description(Language::English, "Temperatures", 60, "0 °C", "100 °C"),
+            "History of Temperatures, 60 seconds, axis 0 °C to 100 °C"
+        );
+        assert_eq!(
+            history_chart_description(Language::SimplifiedChinese, "温度", 60, "0 °C", "100 °C"),
+            "温度历史记录，60 秒，纵轴从 0 °C 到 100 °C"
+        );
+        assert_eq!(
+            unknown_clock_reason(Language::SimplifiedChinese, 0x42),
+            "未知原因 0x0000000000000042"
+        );
+    }
+
+    #[test]
+    fn typed_status_renderers_cover_every_variant_and_option_branch() {
+        let static_statuses = [
+            (
+                UiStatus::AcerControlsConnected,
+                super::MessageId::StatusAcerControlsConnected,
+            ),
+            (
+                UiStatus::AcerNvidiaControlsConnected,
+                super::MessageId::StatusAcerNvidiaControlsConnected,
+            ),
+            (
+                UiStatus::ReadOnlyTelemetryConnected,
+                super::MessageId::StatusReadOnlyTelemetryConnected,
+            ),
+            (
+                UiStatus::ConnectingControls,
+                super::MessageId::StatusConnectingControls,
+            ),
+            (
+                UiStatus::PlatformRefreshed,
+                super::MessageId::StatusPlatformRefreshed,
+            ),
+            (
+                UiStatus::SettingsConfirmed,
+                super::MessageId::StatusSettingsConfirmed,
+            ),
+            (
+                UiStatus::LightingConfirmed,
+                super::MessageId::StatusLightingConfirmed,
+            ),
+            (
+                UiStatus::AppliedWithoutReadback,
+                super::MessageId::StatusAppliedWithoutReadback,
+            ),
+            (
+                UiStatus::WritingAndVerifying,
+                super::MessageId::StatusWritingAndVerifying,
+            ),
+        ];
+        for language in super::i18n::LocaleId::ENABLED {
+            for (status, expected) in &static_statuses {
+                assert_eq!(
+                    render_ui_status(language, status),
+                    super::text(language, *expected)
+                );
+                assert!(!render_compact_status(language, status).is_empty());
+            }
+        }
+
+        let profile_cases = [
+            (
+                "low-power",
+                GpuOffsetState::Unavailable,
+                None,
+                super::MessageId::StatusCompactProfileEco,
+            ),
+            (
+                "quiet",
+                GpuOffsetState::Reset,
+                Some(ProfilePowerReceipt {
+                    enforced_limit_mw: 115_000,
+                    maximum_limit_mw: 140_000,
+                    clock_event_reasons: crate::nvidia::ClockEventReasons::default(),
+                }),
+                super::MessageId::StatusCompactProfileQuiet,
+            ),
+            (
+                "balanced",
+                GpuOffsetState::OemTurbo,
+                None,
+                super::MessageId::StatusCompactProfileBalanced,
+            ),
+            (
+                "balanced-performance",
+                GpuOffsetState::CustomOrPartial,
+                Some(ProfilePowerReceipt {
+                    enforced_limit_mw: 115_000,
+                    maximum_limit_mw: 140_000,
+                    clock_event_reasons: crate::nvidia::ClockEventReasons::default(),
+                }),
+                super::MessageId::StatusCompactProfilePerformance,
+            ),
+            (
+                "performance",
+                GpuOffsetState::Reset,
+                None,
+                super::MessageId::StatusCompactProfileTurbo,
+            ),
+            (
+                "future-profile",
+                GpuOffsetState::Unavailable,
+                Some(ProfilePowerReceipt {
+                    enforced_limit_mw: 115_000,
+                    maximum_limit_mw: 140_000,
+                    clock_event_reasons: crate::nvidia::ClockEventReasons::default(),
+                }),
+                super::MessageId::StatusCompactProfileGeneric,
+            ),
+        ];
+        for language in super::i18n::LocaleId::ENABLED {
+            for (profile, offsets, power, compact_id) in &profile_cases {
+                let status = UiStatus::ProfileVerified(ProfileApplyReceipt {
+                    firmware_profile: (*profile).to_string(),
+                    gpu_offsets: *offsets,
+                    gpu_pstate_count: 4,
+                    gpu_capability_available: true,
+                    power: power.clone(),
+                });
+                let rendered = render_ui_status(language, &status);
+                assert!(rendered.starts_with(super::text(
+                    language,
+                    super::MessageId::StatusProfileVerified
+                )));
+                assert!(rendered.contains(profile));
+                match offsets {
+                    GpuOffsetState::Unavailable => assert!(rendered.contains(super::text(
+                        language,
+                        super::MessageId::StatusOffsetUnavailable
+                    ))),
+                    GpuOffsetState::Reset => assert!(rendered.contains("+0/+0 MHz")),
+                    GpuOffsetState::OemTurbo => assert!(rendered.contains("+100/+200 MHz")),
+                    GpuOffsetState::CustomOrPartial => assert!(rendered.contains(super::text(
+                        language,
+                        super::MessageId::StatusOffsetCustomOrPartial
+                    ))),
+                }
+                if power.is_some() {
+                    assert!(rendered.contains("GPU 115/140 W"));
+                } else {
+                    assert!(rendered.contains(super::text(
+                        language,
+                        super::MessageId::StatusGpuLimitUnavailable
+                    )));
+                }
+                assert_eq!(
+                    render_compact_status(language, &status),
+                    super::text(language, *compact_id)
+                );
+            }
+        }
+
+        let all_platform_bits = super::READ_ERROR_BATTERY_LIMIT
+            | super::READ_ERROR_BATTERY_CALIBRATION
+            | super::READ_ERROR_USB_CHARGING
+            | super::READ_ERROR_KEYBOARD_TIMEOUT
+            | super::READ_ERROR_BOOT_SOUND
+            | super::READ_ERROR_LCD_OVERRIDE
+            | super::READ_ERROR_REAR_LOGO;
+        let platform_fields = PlatformReadErrorSet::from_mask(all_platform_bits).unwrap();
+        let raw_lighting = super::RawDetail::new("rgb-raw-detail");
+        let raw_platform = super::RawDetail::new("platform-raw-detail");
+        let raw_hardware = super::RawDetail::new("hardware-raw-detail");
+        let partial = UiStatus::PartialCapabilities(vec![
+            UiDiagnostic::Lighting(raw_lighting),
+            UiDiagnostic::Platform(PlatformIssue::Readback(platform_fields)),
+            UiDiagnostic::Platform(PlatformIssue::Raw(raw_platform)),
+            UiDiagnostic::Hardware(raw_hardware),
+        ]);
+        for language in super::i18n::LocaleId::ENABLED {
+            let fields = render_platform_fields(language, platform_fields);
+            for id in [
+                super::MessageId::PlatformFieldBatteryLimit,
+                super::MessageId::PlatformFieldBatteryCalibration,
+                super::MessageId::PlatformFieldUsbCharging,
+                super::MessageId::PlatformFieldKeyboardTimeout,
+                super::MessageId::PlatformFieldBootSound,
+                super::MessageId::PlatformFieldLcdOverride,
+                super::MessageId::PlatformFieldRearLogo,
+            ] {
+                assert!(fields.contains(super::text(language, id)));
+            }
+            let rendered = render_ui_status(language, &partial);
+            assert!(rendered.starts_with(super::text(
+                language,
+                super::MessageId::StatusPartialCapabilities
+            )));
+            for raw in [
+                "rgb-raw-detail",
+                "platform-raw-detail",
+                "hardware-raw-detail",
+            ] {
+                assert!(rendered.contains(raw));
+                assert_ne!(rendered, raw);
+            }
+            assert!(rendered.contains(&fields));
+            assert_eq!(
+                render_compact_status(language, &partial),
+                super::text(language, super::MessageId::AppCompactStatus001)
+            );
+
+            let readback = UiStatus::PlatformReadbackFailed(platform_fields);
+            assert_eq!(
+                render_ui_status(language, &readback),
+                format!(
+                    "{}: {fields}",
+                    super::text(language, super::MessageId::StatusPlatformReadbackFailed)
+                )
+            );
+            assert_eq!(
+                render_compact_status(language, &readback),
+                super::text(language, super::MessageId::AppCompactStatus001)
+            );
+
+            let mismatch = UiStatus::GpuProfileMismatch {
+                core_mhz: -125,
+                memory_mhz: 250,
+            };
+            let mismatch_rendered = render_ui_status(language, &mismatch);
+            assert!(mismatch_rendered.contains("core -125"));
+            assert!(mismatch_rendered.contains("VRAM +250 MHz"));
+            assert_eq!(
+                render_compact_status(language, &mismatch),
+                super::text(language, super::MessageId::AppCompactStatus002)
+            );
+
+            for (kind, id) in [
+                (
+                    UiErrorKind::Initialization,
+                    super::MessageId::StatusInitializationFailure,
+                ),
+                (UiErrorKind::Fan, super::MessageId::StatusFanFailure),
+                (UiErrorKind::Profile, super::MessageId::StatusProfileFailure),
+                (
+                    UiErrorKind::Lighting,
+                    super::MessageId::StatusLightingFailure,
+                ),
+                (
+                    UiErrorKind::Platform,
+                    super::MessageId::StatusPlatformFailure,
+                ),
+                (UiErrorKind::Refresh, super::MessageId::StatusRefreshFailure),
+            ] {
+                let failure = UiStatus::Failure {
+                    kind,
+                    detail: super::RawDetail::new("bounded-raw-detail"),
+                };
+                assert_eq!(
+                    render_ui_status(language, &failure),
+                    format!("{}: bounded-raw-detail", super::text(language, id))
+                );
+                assert_eq!(
+                    render_compact_status(language, &failure),
+                    super::text(language, id)
+                );
+            }
+
+            assert_eq!(
+                render_telemetry_status(language, TelemetryHealth::Online),
+                None
+            );
+            let connecting = super::text(language, super::MessageId::StatusTelemetryConnecting);
+            assert_eq!(
+                render_telemetry_status(language, TelemetryHealth::Connecting),
+                Some((connecting.to_string(), connecting.to_string()))
+            );
+            let reconnecting = super::text(language, super::MessageId::StatusTelemetryReconnecting);
+            assert_eq!(
+                render_telemetry_status(
+                    language,
+                    TelemetryHealth::Reconnecting {
+                        retry_after_seconds: u64::MAX,
+                    }
+                ),
+                Some((
+                    format!(
+                        "{} · {} {} s",
+                        reconnecting,
+                        super::text(language, super::MessageId::StatusRetryIn),
+                        u64::MAX
+                    ),
+                    reconnecting.to_string(),
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn raw_detail_is_bounded_and_never_replaces_the_localized_summary() {
+        let detail = super::RawDetail::new("x".repeat(super::RAW_DETAIL_MAX_CHARS + 20));
+        assert_eq!(
+            detail.as_str().chars().count(),
+            super::RAW_DETAIL_MAX_CHARS + 1
+        );
+        assert!(detail.as_str().ends_with('…'));
+        let status = UiStatus::Failure {
+            kind: UiErrorKind::Fan,
+            detail,
+        };
+        assert!(render_ui_status(Language::English, &status).starts_with("Fan setting failed: "));
+        assert!(
+            render_ui_status(Language::Czech, &status)
+                .starts_with("Nastavení ventilátorů selhalo: ")
+        );
+        assert!(
+            render_ui_status(Language::SimplifiedChinese, &status).starts_with("风扇设置失败: ")
+        );
+        assert_eq!(
+            render_compact_status(Language::SimplifiedChinese, &status),
+            super::text(
+                Language::SimplifiedChinese,
+                super::MessageId::StatusFanFailure
+            )
+        );
+    }
+
+    #[test]
     fn write_only_lighting_apply_preserves_readable_wmi_state() {
         let mut state = AppState {
             lighting: KeyboardLightingState {
@@ -5155,47 +5538,60 @@ mod tests {
 
         assert_eq!(state.lighting, readable_state);
         assert_eq!(state.last_applied_lighting, vec![request]);
-        assert_eq!(state.status_message, "Použito · stav nelze přečíst");
+        assert_eq!(state.status, UiStatus::AppliedWithoutReadback);
+        assert_eq!(
+            render_ui_status(Language::Czech, &state.status),
+            "Použito · stav nelze přečíst"
+        );
     }
 
     #[test]
-    fn compact_status_keeps_basic_receipts_readable_in_both_languages() {
-        let turbo = "Profil potvrzen: Acer performance · VF +100/+200 MHz · GPU 115/140 W";
-        assert_eq!(compact_status(Language::Czech, turbo), "Turbo potvrzeno");
+    fn typed_compact_status_keeps_receipts_localized_without_parsing_prose() {
+        let turbo = UiStatus::ProfileVerified(ProfileApplyReceipt {
+            firmware_profile: "performance".to_string(),
+            gpu_offsets: GpuOffsetState::OemTurbo,
+            gpu_pstate_count: 4,
+            gpu_capability_available: true,
+            power: None,
+        });
         assert_eq!(
-            compact_status(
-                Language::English,
-                "Profile verified: Acer performance · VF +100/+200 MHz · GPU 115/140 W"
-            ),
+            render_compact_status(Language::Czech, &turbo),
+            "Turbo potvrzeno"
+        );
+        assert_eq!(
+            render_compact_status(Language::English, &turbo),
             "Turbo verified"
         );
+        let partial = UiStatus::PartialCapabilities(vec![UiDiagnostic::Lighting(
+            super::RawDetail::new("temporary RGB readback failure"),
+        )]);
         assert_eq!(
-            compact_status(
-                Language::English,
-                "Částečné capabilities: platform: readback failed: USB charging"
-            ),
+            render_compact_status(Language::English, &partial),
             "Partial readback"
         );
+        let mismatch = UiStatus::GpuProfileMismatch {
+            core_mhz: 0,
+            memory_mhz: 200,
+        };
         assert_eq!(
-            compact_status(
-                Language::Czech,
-                "GPU profil není synchronní: core +0 / VRAM +200 MHz"
-            ),
-            "GPU nesedí: +0/+200 MHz"
+            render_compact_status(Language::Czech, &mismatch),
+            "GPU nesedí"
         );
-        assert_eq!(
-            compact_status(
-                Language::English,
-                "an otherwise unknown diagnostic that is deliberately much too long"
+        let failure = UiStatus::Failure {
+            kind: UiErrorKind::Refresh,
+            detail: super::RawDetail::new(
+                "an otherwise unknown diagnostic that is deliberately much too long",
             ),
-            "Details above"
+        };
+        assert_eq!(
+            render_compact_status(Language::English, &failure),
+            "State refresh failed"
         );
         for status in [
             "Turbo potvrzeno",
             "Partial readback",
-            "GPU nesedí: +0/+200 MHz",
-            "Firmware funkci nepodporuje",
-            "Control service unavailable",
+            "GPU nesedí",
+            "State refresh failed",
         ] {
             assert!(status.chars().count() <= 28, "status is too long: {status}");
         }
@@ -5203,25 +5599,25 @@ mod tests {
 
     #[test]
     fn write_only_lighting_never_claims_firmware_readback() {
-        assert_eq!(lighting_apply_status(true), "Nastavení potvrzeno firmwarem");
-        assert_eq!(lighting_apply_status(false), "Použito · stav nelze přečíst");
+        assert_eq!(lighting_apply_status(true), UiStatus::SettingsConfirmed);
         assert_eq!(
-            localized_status(Language::English, lighting_apply_status(false)),
+            lighting_apply_status(false),
+            UiStatus::AppliedWithoutReadback
+        );
+        assert_eq!(
+            render_ui_status(Language::English, &lighting_apply_status(false)),
             "Applied · state readback unavailable"
         );
         assert_eq!(
-            compact_status(Language::English, lighting_apply_status(false)),
+            render_compact_status(Language::English, &lighting_apply_status(false)),
             "Last applied"
         );
         assert_eq!(
-            localized_status(
-                Language::English,
-                "Nastavení podsvícení potvrzeno firmwarem"
-            ),
+            render_ui_status(Language::English, &UiStatus::LightingConfirmed),
             "Lighting confirmed by firmware"
         );
         assert_eq!(
-            compact_status(Language::Czech, "Nastavení podsvícení potvrzeno firmwarem"),
+            render_compact_status(Language::Czech, &UiStatus::LightingConfirmed),
             "Podsvícení potvrzeno"
         );
     }
@@ -5277,7 +5673,7 @@ mod tests {
         assert!(!state.control_busy);
         assert_eq!(state.health, HealthState::Healthy);
         assert_eq!(state.fan_mode, FanMode::Maximum);
-        assert_eq!(state.status_message, "Nastavení potvrzeno firmwarem");
+        assert_eq!(state.status, UiStatus::SettingsConfirmed);
     }
 
     #[test]
@@ -5318,7 +5714,7 @@ mod tests {
             reconcile_profile_telemetry(&mut state, profile, Some(core), Some(memory), Some(true));
             assert_eq!(state.platform_profile, PlatformProfile::Turbo);
             assert_eq!(state.health, HealthState::Healthy);
-            assert!(!state.status_message.contains("není synchronní"));
+            assert!(!matches!(state.status, UiStatus::GpuProfileMismatch { .. }));
         }
 
         reconcile_profile_telemetry(
@@ -5356,10 +5752,12 @@ mod tests {
         );
         assert_eq!(state.platform_profile, PlatformProfile::Turbo);
         assert_eq!(state.health, HealthState::Warning);
-        assert!(
-            state
-                .status_message
-                .starts_with("GPU profil není synchronní:")
+        assert_eq!(
+            state.status,
+            UiStatus::GpuProfileMismatch {
+                core_mhz: 0,
+                memory_mhz: 0,
+            }
         );
 
         reconcile_profile_telemetry(
@@ -5370,7 +5768,7 @@ mod tests {
             Some(true),
         );
         assert_eq!(state.health, HealthState::Healthy);
-        assert_eq!(state.status_message, "Ovládání Acer + NVIDIA připojeno");
+        assert_eq!(state.status, UiStatus::AcerNvidiaControlsConnected);
     }
 
     #[test]
@@ -5396,9 +5794,13 @@ mod tests {
 
     #[test]
     fn background_platform_refresh_does_not_replace_global_status() {
+        let warning = UiStatus::GpuProfileMismatch {
+            core_mhz: 0,
+            memory_mhz: 200,
+        };
         let mut state = AppState {
             health: HealthState::Warning,
-            status_message: "existing warning".to_string(),
+            status: warning.clone(),
             ..AppState::default()
         };
         let request = ControlRequest::background(ControlAction::Platform(PlatformAction::Refresh));
@@ -5415,10 +5817,12 @@ mod tests {
         assert!(!state.control_busy);
         assert!(!state.platform_busy);
         assert_eq!(state.health, HealthState::Warning);
-        assert_eq!(state.status_message, "existing warning");
+        assert_eq!(state.status, warning);
         assert_eq!(
-            state.platform_error.as_deref(),
-            Some("platform unavailable")
+            state.platform_error,
+            Some(super::PlatformIssue::Raw(super::RawDetail::new(
+                "platform unavailable"
+            )))
         );
     }
 
@@ -5463,8 +5867,19 @@ mod tests {
         assert!(!state.platform_busy);
         assert!(state.controls_enabled);
         assert_eq!(state.capabilities, Some(capabilities));
-        assert_eq!(state.platform_error.as_deref(), Some("refresh failed"));
-        assert_eq!(state.status_message, "refresh failed");
+        assert_eq!(
+            state.platform_error,
+            Some(super::PlatformIssue::Raw(super::RawDetail::new(
+                "refresh failed"
+            )))
+        );
+        assert_eq!(
+            state.status,
+            UiStatus::Failure {
+                kind: UiErrorKind::Refresh,
+                detail: super::RawDetail::new("refresh failed"),
+            }
+        );
     }
 
     #[test]
@@ -5522,12 +5937,14 @@ mod tests {
 
         assert_eq!(state.lighting, verified);
         assert_eq!(
-            state.lighting_error.as_deref(),
-            Some("temporary RGB readback failure")
+            state.lighting_error,
+            Some(super::RawDetail::new("temporary RGB readback failure"))
         );
         assert_eq!(
             diagnostics,
-            vec!["RGB: temporary RGB readback failure".to_string()]
+            vec![UiDiagnostic::Lighting(super::RawDetail::new(
+                "temporary RGB readback failure"
+            ))]
         );
     }
 
@@ -5545,7 +5962,13 @@ mod tests {
         assert!(!state.control_busy);
         assert!(!state.controls_enabled);
         assert_eq!(state.health, HealthState::Warning);
-        assert_eq!(state.status_message, "initialization failed");
+        assert_eq!(
+            state.status,
+            UiStatus::Failure {
+                kind: UiErrorKind::Initialization,
+                detail: super::RawDetail::new("initialization failed"),
+            }
+        );
     }
 
     #[test]
@@ -5724,7 +6147,7 @@ mod tests {
 
         assert!(production.contains("with_decorations(false)"));
         assert!(production.contains("with_resizable(true)"));
-        assert!(production.contains("WindowChrome {}"));
+        assert!(production.contains("WindowChrome { language: language() }"));
         assert!(production.contains("ResizeHandles {"));
         assert!(production.contains("drag_resize_window"));
         assert!(production.contains("new ResizeObserver(schedule)"));
@@ -5983,7 +6406,8 @@ mod tests {
     fn ui_never_replaces_text_with_an_ellipsis() {
         let production = production_source();
         assert!(!APP_CSS_SOURCE.contains("text-overflow: ellipsis"));
-        assert!(!production.contains('…'));
+        assert_eq!(production.matches('…').count(), 1);
+        assert!(production.contains("bounded.push('…')"));
         assert!(!production.contains("..."));
     }
 
@@ -6061,7 +6485,10 @@ mod tests {
         assert!(APP_CSS_SOURCE.contains("grid-template-columns: repeat(5, minmax(0, 1fr))"));
         assert!(hardware_note_rule.contains("grid-column: 1 / -1"));
         assert!(hardware_note_rule.contains("white-space: nowrap"));
-        assert!(production.contains("Read-only kernel and firmware data"));
+        assert_eq!(
+            super::text(Language::English, super::MessageId::AppHardwarePanel019,),
+            "Read-only kernel and firmware data; unavailable values are not inferred."
+        );
         assert!(APP_CSS_SOURCE.contains(".spark-chart"));
         assert!(APP_CSS_SOURCE.contains("overflow: hidden"));
         assert!(source.contains("view_box: \"0 0 100 46\""));
@@ -6123,8 +6550,14 @@ mod tests {
         assert!(
             APP_CSS_SOURCE.contains(".logo-color { grid-template-columns: minmax(0, 1fr) 72px; }")
         );
-        assert!(production.contains("Příkon GPU / limit"));
-        assert!(production.contains("GPU power / limit"));
+        assert_eq!(
+            super::text(Language::Czech, super::MessageId::AppAdvancedPanel013,),
+            "Příkon GPU / limit"
+        );
+        assert_eq!(
+            super::text(Language::English, super::MessageId::AppAdvancedPanel013,),
+            "GPU power / limit"
+        );
         assert!(!production.contains("GPU výkon a takty"));
     }
 }

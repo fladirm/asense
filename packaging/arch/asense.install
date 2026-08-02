@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+post_install() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemd-hwdb update >/dev/null 2>&1 || true
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+  printf '%s\n' \
+    'ASense installed. Select the desktop account explicitly with:' \
+    '  sudo asense-configure-user USER'
+}
+
+post_upgrade() {
+  local desktop_user
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemd-hwdb update >/dev/null 2>&1 || true
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+  if [[ -r /etc/asense/desktop-user ]]; then
+    desktop_user="$(sed -n '1p' /etc/asense/desktop-user)"
+    if /usr/bin/asense-configure-user "$desktop_user"; then
+      printf 'ASense upgraded; control socket restored for %s.\n' \
+        "$desktop_user"
+    else
+      printf '%s\n' \
+        'ASense upgraded, but its private socket could not be restored.' \
+        'Run: sudo asense-configure-user USER'
+    fi
+  else
+    printf '%s\n' \
+      'ASense upgraded. Select the desktop account explicitly with:' \
+      '  sudo asense-configure-user USER'
+  fi
+}
+
+pre_upgrade() {
+  systemctl stop asense.socket asense.service >/dev/null 2>&1 || true
+  if [[ -x /usr/lib/asense/asensed ]]; then
+    /usr/lib/asense/asensed --failsafe-auto >/dev/null 2>&1 || true
+  fi
+}
+
+pre_remove() {
+  if [[ -x /usr/lib/asense/asense-shortcut && \
+    -r /etc/asense/desktop-user ]]; then
+    /usr/lib/asense/asense-shortcut remove \
+      "$(sed -n '1p' /etc/asense/desktop-user)" >/dev/null 2>&1 || true
+  fi
+  systemctl disable --now asense.socket >/dev/null 2>&1 || true
+  systemctl stop asense.service >/dev/null 2>&1 || true
+  if [[ -x /usr/lib/asense/asensed ]]; then
+    /usr/lib/asense/asensed --failsafe-auto >/dev/null 2>&1 || true
+  fi
+  modprobe -r asense_rgb >/dev/null 2>&1 || true
+}
+
+post_remove() {
+  rm -f /etc/systemd/system/asense.socket /etc/asense/desktop-user
+  rmdir /etc/asense 2>/dev/null || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemd-hwdb update >/dev/null 2>&1 || true
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+}

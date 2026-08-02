@@ -57,7 +57,10 @@ jobs:
             install.sh \
             uninstall.sh \
             packaging/common.sh \
+            scripts/package-debian-source.sh \
             scripts/package-release.sh \
+            scripts/render-aur.sh \
+            scripts/version.sh \
             scripts/verify-release.sh
           sh -n packaging/asense-system-sleep
           udevadm verify packaging/71-asense-hid.rules

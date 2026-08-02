@@ -5,7 +5,7 @@ It provides performance profiles, fan control, lighting, selected firmware
 options and live telemetry without requiring PredatorSense or NitroSense.
 
 The Predator Helios Neo 16 **PHN16-72** is the reference-tested platform.
-ASense v0.2 also discovers compatible Linux, Acer WMI and HID interfaces on
+Since v0.2, ASense discovers compatible Linux, Acer WMI and HID interfaces on
 other models and shows only the controls found on the machine.
 
 <!-- markdownlint-disable MD013 MD033 -->
@@ -31,7 +31,7 @@ other models and shows only the controls found on the machine.
 - USB-off charging, keyboard timeout, boot sound, LCD override and rear-logo
   controls when exposed by firmware;
 - compact controls plus advanced graphs and hardware information;
-- English and Czech UI.
+- English, Czech and Simplified Chinese UI.
 
 Missing capabilities are hidden independently: a notebook can have profiles
 and RPM without fan writes, or lighting without battery options.
@@ -189,9 +189,9 @@ Download the installer ZIP and matching `.zip.sha256` from the Release page,
 then verify and install it as the logged-in desktop user (not with `sudo`):
 
 ```bash
-sha256sum --check asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.2.2-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.2.2-ubuntu-26.04-x86_64-installer-*/
+sha256sum --check asense-v0.3.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
+unzip asense-v0.3.0-ubuntu-26.04-x86_64-installer-*.zip
+cd asense-v0.3.0-ubuntu-26.04-x86_64-installer-*/
 ./install.sh
 ```
 
@@ -206,6 +206,23 @@ installer and uninstaller refuse to modify an installation currently managed
 by dpkg. Run `sudo apt purge asense` before switching from the Debian package
 back to a standalone release; a plain `apt remove` deliberately leaves package
 state whose later purge could otherwise affect the standalone installation.
+
+### Arch Linux / AUR
+
+The stable [`asense`](https://aur.archlinux.org/packages/asense) AUR source
+package builds ASense and its DKMS transport from the tagged source with the
+system Rust toolchain. Clone and install it as your regular build user:
+
+```bash
+git clone https://aur.archlinux.org/asense.git
+cd asense
+makepkg -si
+sudo asense-configure-user "$USER"
+```
+
+The final command explicitly selects the desktop account allowed to use the
+private ASense control socket; the package never guesses the packager's user.
+Remove it with `sudo pacman -Rns asense`.
 
 Launch ASense from the application menu or run:
 

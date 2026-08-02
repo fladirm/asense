@@ -1,3 +1,14 @@
+asense (0.3.0-1~local1) resolute; urgency=medium
+
+  * Ship the bounded passive schema-3 compatibility probe and synchronized
+    evidence/privacy workflow from the diagnostic candidate.
+  * Add complete static English, Czech and Simplified Chinese UI catalogs
+    with typed status rendering and unprivileged locale persistence.
+  * Add checked version-derived standalone, Debian/PPA and Arch/AUR packaging
+    authorities without adding unverified hardware controls.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Sun, 02 Aug 2026 05:32:00 +0200
+
 asense (0.3.0~rc1-1~local1) resolute; urgency=medium
 
   * Add the bounded, read-only schema-3 compatibility probe with typed source,

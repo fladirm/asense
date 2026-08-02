@@ -64,8 +64,7 @@ Release.
 Download that artifact, then verify all checksums:
 
 ```bash
-version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
-test -n "$version"
+version="$(scripts/version.sh show)"
 sha256sum --check asense-v"$version"-ubuntu-26.04-x86_64-installer-*.zip.sha256
 sha256sum --check asense-v"$version"-source-*.zip.sha256
 sha256sum --check SHA256SUMS
@@ -92,8 +91,7 @@ the device can return to `suspended` without restarting ASense.
 Only after that exact asset passes, create and push the annotated tag:
 
 ```bash
-version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
-test -n "$version"
+version="$(scripts/version.sh show)"
 git tag -a "v$version" -m "ASense v$version"
 git push origin "v$version"
 ```
@@ -110,6 +108,64 @@ Release notes must use the hardware terms from the README accurately:
 `Reference tested`, `Kernel backed`, `Detected` and `Community confirmed`.
 Do not describe a model as physically tested merely because a standard kernel
 node or known controller passed discovery.
+
+## Debian source and PPA
+
+Launchpad builds without network access, so the signed upload has two
+deterministic upstream components: the exact tagged source and the locked
+Cargo vendor tree. From a clean checkout at the accepted final tag, with no
+pre-existing output files in its parent directory, create and verify them:
+
+```bash
+version="$(scripts/version.sh show)"
+debian_upstream="$(scripts/version.sh debian-upstream)"
+test "$(git describe --tags --exact-match)" = "v$version"
+scripts/package-debian-source.sh ..
+(cd .. && sha256sum --check \
+  "asense_${debian_upstream}.orig-SHA256SUMS.txt")
+```
+
+The PPA revision is a Debian-packaging derivative of that immutable tagged
+upstream source. In the packaging checkout, change only the top changelog
+version from the local candidate suffix to
+`<VERSION>-1~ppa1~resolute1`, retain distribution `resolute`, then sign and
+inspect the source upload:
+
+```bash
+debian_version="$(dpkg-parsechangelog -SVersion)"
+dpkg-buildpackage -S -sa
+lintian "../asense_${debian_version}_source.changes"
+dput ppa:fladirmacht/asense "../asense_${debian_version}_source.changes"
+```
+
+Record the signed `.dsc`, `.changes`, component checksums and signing
+fingerprint. Wait for Launchpad to publish both build and binary, inspect its
+log, then verify an `apt update` plus package-managed upgrade from the PPA.
+Never upload the `~local1` candidate or regenerate an orig component from a
+dirty packaging tree.
+
+## Stable Arch/AUR source package
+
+The AUR package is generated only after the final GitHub tag is publicly
+downloadable. Pin the tag archive by SHA-256, render `PKGBUILD`, `.SRCINFO` and
+the install hook, then build and inspect that exact source package:
+
+```bash
+version="$(scripts/version.sh show)"
+source_url="https://github.com/fladirm/asense/archive/refs/tags/v${version}.tar.gz"
+curl --fail --location --output "asense-${version}.tar.gz" "$source_url"
+source_sha256="$(sha256sum "asense-${version}.tar.gz" | cut -d' ' -f1)"
+scripts/render-aur.sh aur-staging "$source_url" "$source_sha256"
+(cd aur-staging && makepkg --syncdeps --cleanbuild --check)
+namcap aur-staging/PKGBUILD aur-staging/asense-*.pkg.tar.zst
+```
+
+Copy only `PKGBUILD`, `.SRCINFO` and `asense.install` into the separate AUR
+repository, review its commit and push it once. Clone the public AUR repository
+afresh, confirm the tag checksum and repeat the clean build. Installation must
+still explicitly select the desktop account with
+`sudo asense-configure-user USER`; the package must never infer the packager's
+identity.
 
 Before considering the release complete:
 

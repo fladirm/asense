@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command in base64 bash cargo cmp desktop-file-validate find grep head install make mktemp rustc rustfmt sed sh sort systemd-analyze systemd-hwdb tr udevadm; do
+for command in base64 bash cargo cmp desktop-file-validate dpkg-parsechangelog find grep install make mktemp rustc rustfmt sed sh sort systemd-analyze systemd-hwdb tr udevadm; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'asense-verify: missing command: %s\n' "$command" >&2
     exit 1
@@ -51,35 +51,25 @@ run() {
 run cargo fmt --all -- --check
 
 printf '\n==> release version authorities\n'
-version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
-lock_version="$(sed -n '/^name = "asense"$/{n;s/^version = "\([^"]*\)"$/\1/p;q}' Cargo.lock)"
-dkms_version="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"$/\1/p' kernel/dkms.conf)"
-module_version="$(sed -n 's/^MODULE_VERSION("\([^"]*\)");$/\1/p' kernel/asense_rgb.c)"
-[[ -n "$version" && "$lock_version" == "$version" && "$dkms_version" == "$version" \
-  && "$module_version" == "$version" ]] || {
-  printf 'asense-verify: Cargo/lock/DKMS/module versions differ: %s %s %s %s\n' \
-    "$version" "$lock_version" "$dkms_version" "$module_version" >&2
-  exit 1
-}
-for source in kernel/asense_rgb.c kernel/Makefile kernel/LICENSE; do
-  grep --fixed-strings --line-regexp \
-    "$source usr/src/asense-rgb-$version" debian/asense.install >/dev/null
-done
-grep --fixed-strings --line-regexp "docs/RELEASE_NOTES_v$version.md" \
-  debian/asense.docs >/dev/null
-[[ -f "docs/RELEASE_NOTES_v$version.md" ]] || {
-  printf 'asense-verify: release notes are absent for %s\n' "$version" >&2
-  exit 1
-}
-grep --fixed-strings "ASense $version" debian/asense.1 >/dev/null
-grep --fixed-strings "ASense $version" debian/asense-configure-user.8 >/dev/null
-grep --fixed-strings "<release version=\"$version\"" \
-  debian/io.github.fladirm.asense.metainfo.xml >/dev/null
+scripts/version.sh check
+version="$(scripts/version.sh show)"
 grep --fixed-strings --line-regexp \
   "rustflag_separator := \$(shell printf '\\037')" debian/rules >/dev/null
 grep --fixed-strings --line-regexp \
   'export CARGO_ENCODED_RUSTFLAGS := --remap-path-prefix=$(CURDIR)=/usr/src/asense$(rustflag_separator)--remap-path-prefix=$(HOME)=/usr/src/build-home' \
   debian/rules >/dev/null
+
+printf '\n==> Arch source-package template\n'
+aur_test="$temporary/aur"
+scripts/render-aur.sh --render-only "$aur_test" \
+  "https://github.com/fladirm/asense/archive/refs/tags/v$version.tar.gz" \
+  "1111111111111111111111111111111111111111111111111111111111111111"
+grep --fixed-strings --line-regexp "pkgver=$version" "$aur_test/PKGBUILD"
+if grep -F -e /home/ -e /mnt/ -e wraith "$aur_test/PKGBUILD" \
+  "$aur_test/asense.install" >/dev/null; then
+  printf 'asense-verify: Arch package contains a build-user/path assumption\n' >&2
+  exit 1
+fi
 
 run cargo test --locked --all-targets --all-features
 run cargo test --locked --test kernel_rgb_protocol

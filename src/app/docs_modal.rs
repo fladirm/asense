@@ -1,11 +1,12 @@
 use dioxus::prelude::*;
 
-use super::{Language, tr};
+use super::{Language, MessageId, text};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPOSITORY_URL: &str = "https://github.com/fladirm/asense";
 const RELEASE_URL: &str = "https://github.com/fladirm/asense/releases/latest";
 const PPA_URL: &str = "https://launchpad.net/~fladirmacht/+archive/ubuntu/asense";
+const AUR_URL: &str = "https://aur.archlinux.org/packages/asense";
 const BITCOIN_ADDRESS: &str = "bc1qqdumr0umlaak7tyrrh0jx729z272fv2jr4t5zp";
 const BITCOIN_URI: &str = "bitcoin:bc1qqdumr0umlaak7tyrrh0jx729z272fv2jr4t5zp";
 const PAYPAL_ACCOUNT: &str = "@fladirm";
@@ -38,6 +39,24 @@ const DONATE_QR_DATA_URI: &str = concat!(
 const RELEASE_INSTALL: &str = r#"sudo add-apt-repository ppa:fladirmacht/asense
 sudo apt update
 sudo apt install asense"#;
+
+const STANDALONE_INSTALL: &str = concat!(
+    "sha256sum --check asense-v",
+    env!("CARGO_PKG_VERSION"),
+    "-ubuntu-26.04-x86_64-installer-*.zip.sha256\n",
+    "unzip asense-v",
+    env!("CARGO_PKG_VERSION"),
+    "-ubuntu-26.04-x86_64-installer-*.zip\n",
+    "cd asense-v",
+    env!("CARGO_PKG_VERSION"),
+    "-ubuntu-26.04-x86_64-installer-*/\n",
+    "./install.sh",
+);
+
+const AUR_INSTALL: &str = r#"git clone https://aur.archlinux.org/asense.git
+cd asense
+makepkg -si
+sudo asense-configure-user "$USER""#;
 
 const SOURCE_DEPENDENCIES: &str = r#"sudo apt update
 sudo apt install \
@@ -101,23 +120,11 @@ impl SupportMark {
 
     fn label(self, language: Language) -> &'static str {
         match self {
-            Self::Tested => tr(language, "Referenčně otestováno", "Reference tested"),
-            Self::Linux => tr(language, "Funkci poskytuje Linux", "Provided by Linux"),
-            Self::LinuxProbe => tr(
-                language,
-                "RPM poskytuje Linux, řízení ověří živý probe",
-                "Linux provides RPM; live probe checks control",
-            ),
-            Self::Known => tr(
-                language,
-                "Známý Acer controller nebo protokol",
-                "Known Acer controller or protocol",
-            ),
-            Self::Probe => tr(
-                language,
-                "Zapne se jen po úspěšném živém probe",
-                "Enabled only after a successful live probe",
-            ),
+            Self::Tested => text(language, MessageId::DocsLabel001),
+            Self::Linux => text(language, MessageId::DocsLabel002),
+            Self::LinuxProbe => text(language, MessageId::DocsLabel003),
+            Self::Known => text(language, MessageId::DocsLabel004),
+            Self::Probe => text(language, MessageId::DocsLabel005),
         }
     }
 }
@@ -269,11 +276,11 @@ impl DocsTab {
 
     fn label(self, language: Language) -> &'static str {
         match self {
-            Self::About => tr(language, "O aplikaci", "About"),
-            Self::Usage => tr(language, "Použití", "Usage"),
-            Self::Hardware => "Hardware",
+            Self::About => text(language, MessageId::DocsLabel006),
+            Self::Usage => text(language, MessageId::DocsLabel007),
+            Self::Hardware => text(language, MessageId::AppAdvancedPanel005),
             Self::Api => "API",
-            Self::Project => tr(language, "Projekt", "Project"),
+            Self::Project => text(language, MessageId::CommonProject),
         }
     }
 
@@ -323,7 +330,7 @@ pub(super) fn DocsModal(open: bool, language: Language, on_close: EventHandler<(
                 header { class: "docs-header",
                     div { class: "docs-title-copy",
                         span { class: "docs-kicker", "ASense {VERSION}" }
-                        h2 { id: "docs-title", {tr(language, "Informace a dokumentace", "Information and documentation")} }
+                        h2 { id: "docs-title", {text(language, MessageId::DocsModal001)} }
                     }
                     div { class: "docs-header-actions",
                         a {
@@ -334,15 +341,15 @@ pub(super) fn DocsModal(open: bool, language: Language, on_close: EventHandler<(
                         button {
                             class: "docs-close",
                             r#type: "button",
-                            title: tr(language, "Zavřít dokumentaci", "Close documentation"),
-                            "aria-label": tr(language, "Zavřít dokumentaci", "Close documentation"),
+                            title: text(language, MessageId::CommonCloseDocumentation),
+                            "aria-label": text(language, MessageId::CommonCloseDocumentation),
                             onclick: move |_| on_close.call(()),
                             "×"
                         }
                     }
                 }
 
-                nav { class: "docs-tabs", role: "tablist", "aria-label": tr(language, "Sekce dokumentace", "Documentation sections"),
+                nav { class: "docs-tabs", role: "tablist", "aria-label": text(language, MessageId::DocsModal002),
                     for tab in DocsTab::ALL {
                         button {
                             class: if current == tab { "docs-tab active" } else { "docs-tab" },
@@ -389,7 +396,7 @@ fn AboutPane(active: DocsTab, language: Language) -> Element {
                             img {
                                 class: "docs-qr",
                                 src: DONATE_QR_DATA_URI,
-                                alt: tr(language, "QR kód pro Bitcoin dar", "Bitcoin donation QR code"),
+                                alt: text(language, MessageId::DocsAboutPane001),
                             }
                         }
                         span { "Bitcoin" }
@@ -404,20 +411,16 @@ fn AboutPane(active: DocsTab, language: Language) -> Element {
                             img {
                                 class: "docs-qr docs-paypal-qr",
                                 src: paypal_qr_data_uri,
-                                alt: tr(language, "QR kód pro PayPal dar", "PayPal donation QR code"),
+                                alt: text(language, MessageId::DocsAboutPane002),
                             }
                         }
                         span { "PayPal" }
                     }
                 }
                 div { class: "docs-donate-copy",
-                    span { class: "docs-kicker", {tr(language, "Dobrovolná podpora", "Optional support")} }
-                    h3 { {tr(language, "Podpořit ASense", "Support ASense")} }
-                    p { {tr(
-                        language,
-                        "Bitcoin mainnet nebo PayPal.Me. Dar neodemyká funkce ani nemění licenci nebo podporu.",
-                        "Bitcoin mainnet or PayPal.Me. A donation unlocks no features and changes neither the license nor support.",
-                    )} }
+                    span { class: "docs-kicker", {text(language, MessageId::DocsAboutPane003)} }
+                    h3 { {text(language, MessageId::DocsAboutPane004)} }
+                    p { {text(language, MessageId::DocsAboutPane005)} }
                     div { class: "docs-bitcoin-address", title: BITCOIN_URI, "{BITCOIN_ADDRESS}" }
                     a {
                         class: "docs-paypal-link",
@@ -425,47 +428,31 @@ fn AboutPane(active: DocsTab, language: Language) -> Element {
                         title: PAYPAL_ACCOUNT,
                         "PayPal.Me · {PAYPAL_ACCOUNT}"
                     }
-                    p { class: "docs-fine-print", {tr(
-                        language,
-                        "Před odesláním porovnejte celou adresu v peněžence a posílejte pouze BTC přes Bitcoin mainnet.",
-                        "Compare the complete address in your wallet before sending, and send only BTC over Bitcoin mainnet.",
-                    )} }
+                    p { class: "docs-fine-print", {text(language, MessageId::DocsAboutPane006)} }
                 }
             }
 
             div { class: "docs-version-row",
-                div { span { {tr(language, "Verze", "Version")} } strong { "{VERSION}" } }
-                div { span { {tr(language, "Licence", "License")} } strong { "GPL-2.0-only" } }
-                div { span { {tr(language, "Referenční model", "Reference model")} } strong { "PHN16-72" } }
+                div { span { {text(language, MessageId::DocsAboutPane007)} } strong { "{VERSION}" } }
+                div { span { {text(language, MessageId::CommonLicense)} } strong { "GPL-2.0-only" } }
+                div { span { {text(language, MessageId::DocsAboutPane008)} } strong { "PHN16-72" } }
             }
 
-            h3 { {tr(language, "Co je ASense", "What ASense is")} }
-            p { {tr(
-                language,
-                "ASense je nativní linuxový ovládací panel pro notebooky Acer Predator, Nitro a příbuzné modely. Nabízí profily výkonu, ventilátory, podsvícení, vybrané volby firmwaru a živou telemetrii bez PredatorSense nebo NitroSense.",
-                "ASense is a native Linux control panel for Acer Predator, Nitro and related notebooks. It provides performance profiles, fan control, lighting, selected firmware options and live telemetry without PredatorSense or NitroSense.",
-            )} }
-            p { {tr(
-                language,
-                "PHN16-72 je referenčně otestovaná platforma. Na dalších strojích ASense hledá skutečně přítomná Linux, Acer WMI a HID rozhraní a ukáže jen nalezené funkce.",
-                "PHN16-72 is the reference-tested platform. On other systems ASense discovers the Linux, Acer WMI and HID interfaces actually present and shows only the capabilities it finds.",
-            )} }
+            h3 { {text(language, MessageId::DocsAboutPane009)} }
+            p { {text(language, MessageId::DocsAboutPane010)} }
+            p { {text(language, MessageId::DocsAboutPane011)} }
 
-            h3 { {tr(language, "Hlavní funkce", "Main features")} }
+            h3 { {text(language, MessageId::DocsAboutPane012)} }
             ul {
-                li { {tr(language, "Volby profilů z živého rozhraní Linux kernelu nebo fallbacku známých příkazů Acer Gaming-WMI s ověřením zápisu.", "Profile choices from the live Linux kernel interface or a known-command Acer Gaming-WMI fallback with write verification.")} }
-                li { {tr(language, "Firmware Auto, ruční CPU/GPU a Maximum ventilátory přes kernel PWM nebo Gaming-WMI.", "Firmware Auto, manual CPU/GPU and Maximum fan modes through kernel PWM or Gaming-WMI.")} }
-                li { {tr(language, "Teploty, zátěž, až osm RPM kanálů a NVIDIA telemetrie včetně limitů a důvodů omezení.", "Temperatures, load, up to eight RPM channels and NVIDIA telemetry including limits and throttle reasons.")} }
-                li { {tr(language, "Přesný PHN16-72 Turbo GPU preset s NVML readbackem a rollbackem.", "Exact PHN16-72 Turbo GPU preset with NVML readback and rollback.")} }
-                li { {tr(language, "Jedno až čtyřzónové WMI a ENEK5130 podsvícení klávesnice nebo krytu.", "One-to-four-zone WMI and ENEK5130 keyboard or cover lighting.")} }
-                li { {tr(language, "Limit a kalibrace baterie, USB při vypnutí, timeout klávesnice, startovní zvuk, LCD override a zadní logo, pokud je firmware nabízí.", "Battery limit and calibration, USB-off charging, keyboard timeout, boot sound, LCD override and rear-logo controls when firmware exposes them.")} }
-                li { {tr(language, "Kompaktní ovládání, rozšířené grafy a hardware informace v češtině i angličtině.", "Compact controls, advanced graphs and hardware information in English and Czech.")} }
+                li { {text(language, MessageId::DocsAboutPane013)} }
+                li { {text(language, MessageId::DocsAboutPane014)} }
+                li { {text(language, MessageId::DocsAboutPane015)} }
+                li { {text(language, MessageId::DocsAboutPane016)} }
+                li { {text(language, MessageId::DocsAboutPane017)} }
+                li { {text(language, MessageId::DocsAboutPane018)} }
+                li { {text(language, MessageId::DocsAboutPane019)} }
             }
-            p { class: "docs-note", {tr(
-                language,
-                "Chybějící funkce se skrývají nezávisle. Notebook může mít profily a RPM bez řízení ventilátorů nebo podsvícení bez voleb baterie.",
-                "Missing capabilities are hidden independently. A notebook can have profiles and RPM without fan writes, or lighting without battery options.",
-            )} }
+            p { class: "docs-note", {text(language, MessageId::DocsAboutPane020)} }
         }
     }
 }
@@ -479,59 +466,45 @@ fn UsagePane(active: DocsTab, language: Language) -> Element {
             role: "tabpanel",
             "aria-label": DocsTab::Usage.label(language),
 
-            h3 { {tr(language, "Instalace přes Ubuntu PPA", "Install through the Ubuntu PPA")} }
-            p { {tr(
-                language,
-                "Doporučená instalace je spravovaná přes ASense Ubuntu PPA. APT nainstaluje aplikaci, daemon, DKMS transport a desktopovou integraci společně; Rust není potřeba.",
-                "The recommended installation is managed through the ASense Ubuntu PPA. APT installs the application, daemon, DKMS transport and desktop integration together; Rust is not required.",
-            )} }
-            a { class: "docs-primary-link", href: PPA_URL, {tr(language, "Otevřít PPA", "Open PPA")} }
-            h4 { {tr(language, "Instalace", "Install")} }
+            h3 { {text(language, MessageId::DocsUsagePane001)} }
+            p { {text(language, MessageId::DocsUsagePane002)} }
+            a { class: "docs-primary-link", href: PPA_URL, {text(language, MessageId::DocsUsagePane003)} }
+            h4 { {text(language, MessageId::DocsUsagePane004)} }
             pre { code { "{RELEASE_INSTALL}" } }
 
-            h3 { {tr(language, "Spuštění, diagnostika a odstranění", "Run, probe and uninstall")} }
-            pre { code { "asense\nasense probe > asense-probe.json\nasense probe --summary\nsudo apt remove asense\nsudo apt purge asense" } }
-            p { {tr(
-                language,
-                "Před spuštěním probe zavřete okno ASense, aby jednorázový dotaz mohl použít jedinou control session daemonu.",
-                "Close the ASense window before running the probe so its one-shot request can use the daemon's single control session.",
-            )} }
-            p { {tr(
-                language,
-                "Probe vytvoří autoritativní schema-3 JSON s modelem, napájením, profily, ventilátory a známými WMI/HID transporty. Daemonu po HELLO 2 posílá pouze pevný read-only požadavek DIAG PASSIVE; nevolá obecné capability discovery, neposílá ENEK selector ani setter a nic neuploaduje. Vynechává serialy, UUID, hostname, identitu uživatele, sítě, bootu a úložiště, HID fyzické cesty, journal, surové ACPI tabulky, absolutní cesty a prostředí procesu. Volba --summary je jen čitelný souhrn nové capture; JSON před sdílením zkontrolujte.",
-                "The probe creates the authoritative schema-3 JSON with model, power, profile, fan and known WMI/HID transport evidence. After HELLO 2 it sends only the fixed read-only DIAG PASSIVE request to the daemon; it does not call general capability discovery, send an ENEK selector or setter, or upload anything. It omits serials, UUIDs, hostname, user, network, boot and storage identity, HID physical paths, journals, raw ACPI tables, absolute paths and the process environment. --summary is only a readable view of a fresh capture; review the JSON before sharing.",
-            )} }
-            p { {tr(
-                language,
-                "Odinstalace vrátí aktivní fan session do Auto a odstraní služby, DKMS, HWDB, udev pravidla a desktop položku. Profil, podsvícení a další firmware volby zůstávají nastavené.",
-                "Uninstall returns an active fan session to Auto and removes services, DKMS, HWDB, udev integration and the desktop entry. Profile, lighting and other firmware choices remain configured.",
-            )} }
+            h3 { {text(language, MessageId::DocsStandaloneRelease)} }
+            p { {text(language, MessageId::DocsStandaloneReleaseBody)} }
+            a { class: "docs-primary-link", href: RELEASE_URL, {text(language, MessageId::DocsStandaloneReleaseLink)} }
+            pre { code { "{STANDALONE_INSTALL}" } }
 
-            h3 { "Secure Boot" }
-            p { {tr(
-                language,
-                "DKMS používá distribuční podepisování. Pokud modul hlásí Key was rejected by service, importujte cestu klíče vypsanou DKMS a dokončete MOK enrollment po restartu.",
-                "DKMS uses the distribution signing setup. If loading reports Key was rejected by service, import the key path printed by DKMS and complete MOK enrollment after reboot.",
-            )} }
+            h3 { {text(language, MessageId::DocsArchAur)} }
+            p { {text(language, MessageId::DocsArchAurBody)} }
+            a { class: "docs-primary-link", href: AUR_URL, {text(language, MessageId::DocsArchAurLink)} }
+            pre { code { "{AUR_INSTALL}" } }
+
+            h3 { {text(language, MessageId::DocsUsagePane005)} }
+            pre { code { "asense\nasense probe > asense-probe.json\nasense probe --summary\nsudo apt remove asense\nsudo apt purge asense" } }
+            p { {text(language, MessageId::DocsUsagePane006)} }
+            p { {text(language, MessageId::DocsUsagePane007)} }
+            p { {text(language, MessageId::DocsUsagePane008)} }
+
+            h3 { {text(language, MessageId::DocsSecureBoot)} }
+            p { {text(language, MessageId::DocsUsagePane009)} }
             pre { code { "sudo mokutil --import /var/lib/shim-signed/mok/MOK.der" } }
 
-            h3 { {tr(language, "Sestavení ze zdrojů", "Build from source")} }
+            h3 { {text(language, MessageId::DocsUsagePane010)} }
             pre { code { "{SOURCE_DEPENDENCIES}" } }
-            p { {tr(
-                language,
-                "Použijte Rust nainstalovaný operačním systémem; ASense jej neinstaluje, nepinuje ani nepřepisuje. Poté spusťte:",
-                "Use the Rust toolchain installed by the operating system; ASense does not install, pin or override it. Then run:",
-            )} }
+            p { {text(language, MessageId::DocsUsagePane011)} }
             pre { code { "{SOURCE_BUILD}" } }
 
-            h3 { {tr(language, "Chování ovládání", "Control behaviour")} }
+            h3 { {text(language, MessageId::DocsUsagePane012)} }
             ul {
-                li { {tr(language, "Profily a WMI volby se po zápisu znovu čtou; vícekrokové chyby fan/profil používají rollback.", "Profile and WMI settings are read back; failed multi-step fan/profile changes use rollback.")} }
-                li { {tr(language, "Ruční ventilátory jsou svázané s GUI session a při odpojení se vrátí do Auto.", "Manual fan mode is tied to the GUI session and returns to Auto after a disconnect.")} }
-                li { {tr(language, "Potvrzené Maximum zůstane po zavření GUI; restart daemonu a resume vrátí firmware řízení do Auto.", "A confirmed Maximum remains active after GUI close; daemon restart and resume return firmware control to Auto.")} }
-                li { {tr(language, "HID podsvícení bez getteru ukazuje po startu Neznámý stav a po zápisu Naposledy použito.", "HID lighting without a getter shows State unknown after discovery and Last applied after a successful write.")} }
-                li { {tr(language, "Kalibrace ukazuje pouze skutečný firmware stav a živé napájení; adaptér ponechte připojený.", "Calibration shows only real firmware state and live power data; keep the AC adapter connected.")} }
-                li { {tr(language, "GUI běží bez root práv. Typed hardwarové zápisy provádí root-owned asensed; žádná raw WMI/ACPI/EC/HID konzole neexistuje.", "The GUI is unprivileged. The root-owned asensed helper performs typed hardware writes; no raw WMI/ACPI/EC/HID console is exposed.")} }
+                li { {text(language, MessageId::DocsUsagePane013)} }
+                li { {text(language, MessageId::DocsUsagePane014)} }
+                li { {text(language, MessageId::DocsUsagePane015)} }
+                li { {text(language, MessageId::DocsUsagePane016)} }
+                li { {text(language, MessageId::DocsUsagePane017)} }
+                li { {text(language, MessageId::DocsUsagePane018)} }
             }
         }
     }
@@ -546,14 +519,14 @@ fn HardwarePane(active: DocsTab, language: Language) -> Element {
             role: "tabpanel",
             "aria-label": DocsTab::Hardware.label(language),
 
-            h3 { {tr(language, "Podpora podle funkce", "Support by feature")} }
+            h3 { {text(language, MessageId::DocsHardwarePane001)} }
             div { class: "docs-support-matrix", role: "table",
                 div { class: "docs-support-row docs-support-head", role: "row",
-                    span { role: "columnheader", {tr(language, "Model", "Model")} }
-                    span { role: "columnheader", {tr(language, "Profily", "Profiles")} }
-                    span { role: "columnheader", {tr(language, "Větráky", "Fans")} }
+                    span { role: "columnheader", {text(language, MessageId::DocsHardwarePane002)} }
+                    span { role: "columnheader", {text(language, MessageId::DocsHardwarePane003)} }
+                    span { role: "columnheader", {text(language, MessageId::DocsHardwarePane004)} }
                     span { role: "columnheader", "RGB" }
-                    span { role: "columnheader", {tr(language, "Volby", "Platform")} }
+                    span { role: "columnheader", {text(language, MessageId::DocsHardwarePane005)} }
                 }
                 for row in core_support_rows() {
                     SupportMatrixRow { row, language }
@@ -564,50 +537,38 @@ fn HardwarePane(active: DocsTab, language: Language) -> Element {
             }
 
             div { class: "docs-support-legend",
-                span { "✅ " strong { {tr(language, "Otestováno", "Tested")} } }
+                span { "✅ " strong { {text(language, MessageId::DocsHardwarePane006)} } }
                 span { "🟢 " strong { "Linux" } }
-                span { "🟡 " strong { {tr(language, "Známý controller", "Known controller")} } }
-                span { "🔎 " strong { {tr(language, "Živý probe", "Live probe")} } }
-                span { "🟢·🔎 " strong { "RPM + probe" } }
-                span { "🤝 " strong { {tr(language, "Potvrzeno komunitou", "Community confirmed")} } }
+                span { "🟡 " strong { {text(language, MessageId::DocsHardwarePane007)} } }
+                span { "🔎 " strong { {text(language, MessageId::DocsHardwarePane008)} } }
+                span { "🟢·🔎 " strong { {text(language, MessageId::DocsRpmProbe)} } }
+                span { "🤝 " strong { {text(language, MessageId::DocsHardwarePane009)} } }
             }
-            p { class: "docs-note", {tr(
-                language,
-                "Zelená znamená funkci poskytovanou Linuxem. Žlutá je známý Acer protokol/controller, ale control se stejně ukáže až po správné živé odpovědi. PHN16-72 je plně referenčně otestovaný.",
-                "Green means Linux already provides the feature. Yellow marks a known Acer protocol/controller, but the control still appears only after a valid live response. PHN16-72 is the fully reference-tested platform.",
-            )} }
+            p { class: "docs-note", {text(language, MessageId::DocsHardwarePane010)} }
 
-            h3 { {tr(language, "Pořadí backendů", "Backend order")} }
-            pre { code { "profiles: kernel platform_profile -> Acer Gaming-WMI -> unavailable\nfans:     kernel PWM -> Acer Gaming-WMI -> RPM only\nlighting: zoned WMI or a detected ENEK5130 target" } }
-            p { class: "docs-note", {tr(
-                language,
-                "Kernelové volby profilů pocházejí z živého rozhraní choices. Gaming-WMI fallback nabízí omezenou sadu známých příkazů ovladače, ne seznam vyčtený z firmwaru; probe zdroj označí jako kernel-live nebo known-gaming-wmi-commands.",
-                "Kernel profile choices come from the live choices interface. The Gaming-WMI fallback exposes the driver's bounded known-command set, not a firmware-enumerated list; the probe labels the source as kernel-live or known-gaming-wmi-commands.",
-            )} }
-            p { class: "docs-note", {tr(
-                language,
-                "Názvy modelů nejsou allow-list. Jsou to stroje se známou kernelovou podporou nebo užiteční kandidáti k otestování; rozhoduje živé rozhraní konkrétního notebooku.",
-                "Model names are not an allow-list. They are machines with known kernel support or useful test candidates; the live interface on the actual notebook decides availability.",
-            )} }
+            h3 { {text(language, MessageId::DocsHardwarePane011)} }
+            pre { code { {text(language, MessageId::DocsBackendOrder)} } }
+            p { class: "docs-note", {text(language, MessageId::DocsHardwarePane012)} }
+            p { class: "docs-note", {text(language, MessageId::DocsHardwarePane013)} }
 
             details { class: "docs-details",
-                summary { {tr(language, "Aktuální kandidáti PredatorSense", "Current PredatorSense candidates")} }
+                summary { {text(language, MessageId::DocsHardwarePane014)} }
                 pre { code { "{PREDATOR_CANDIDATES}" } }
             }
             details { class: "docs-details",
-                summary { {tr(language, "Aktuální kandidáti NitroSense", "Current NitroSense candidates")} }
+                summary { {text(language, MessageId::DocsHardwarePane015)} }
                 pre { code { "{NITRO_CANDIDATES}" } }
             }
             details { class: "docs-details",
-                summary { {tr(language, "Starší kandidáti NitroSense", "Legacy NitroSense candidates")} }
+                summary { {text(language, MessageId::DocsHardwarePane016)} }
                 pre { code { "{LEGACY_NITRO_CANDIDATES}" } }
             }
             details { class: "docs-details",
-                summary { {tr(language, "Další kandidáti Predator a Triton", "Additional Predator and Triton candidates")} }
+                summary { {text(language, MessageId::DocsHardwarePane017)} }
                 pre { code { "{OTHER_PREDATOR_CANDIDATES}" } }
             }
             details { class: "docs-details",
-                summary { {tr(language, "Hlášené Battery/APGE modely", "Reported Battery/APGE models")} }
+                summary { {text(language, MessageId::DocsHardwarePane018)} }
                 pre { code { "{BATTERY_CANDIDATES}" } }
             }
         }
@@ -641,30 +602,22 @@ fn ApiPane(active: DocsTab, language: Language) -> Element {
             role: "tabpanel",
             "aria-label": DocsTab::Api.label(language),
 
-            h3 { {tr(language, "Lokální typed API", "Local typed API")} }
-            p { {tr(
-                language,
-                "Nainstalovaný desktopový uživatel vlastní Unix socket /run/asense-control.sock s režimem 0600. Příkazy jsou UTF-8, ukončené newline a první příkaz musí být HELLO 2.",
-                "The installed desktop user owns the 0600 Unix socket /run/asense-control.sock. Commands are UTF-8, newline-terminated, and the first command must be HELLO 2.",
-            )} }
+            h3 { {text(language, MessageId::DocsApiPane001)} }
+            p { {text(language, MessageId::DocsApiPane002)} }
             h4 { "Python" }
             pre { code { "{API_EXAMPLE}" } }
-            p { {tr(
-                language,
-                "Očekávané odpovědi začínají OK protocol=2 a OK caps=1; druhá pokračuje capability JSONem. Každá odpověď má tvar OK <payload> nebo ERR <message>.",
-                "Expected replies begin with OK protocol=2 and OK caps=1; the latter continues with capability JSON. Every reply is OK <payload> or ERR <message>.",
-            )} }
+            p { {text(language, MessageId::DocsApiPane003)} }
 
-            h3 { {tr(language, "Příkazy", "Commands")} }
+            h3 { {text(language, MessageId::DocsApiPane004)} }
             pre { code { "{API_COMMANDS}" } }
 
-            h3 { {tr(language, "Limity a chování", "Limits and behaviour")} }
+            h3 { {text(language, MessageId::DocsApiPane005)} }
             ul {
-                li { {tr(language, "Příkaz má nejvýše 192 bytů bez newline.", "A command is limited to 192 bytes excluding the newline.")} }
-                li { {tr(language, "Obsah odpovědi má nejvýše 4096 bytů.", "Response content is limited to 4096 bytes.")} }
-                li { {tr(language, "Běžné ERR odmítne pouze daný příkaz a session zůstane použitelná.", "A normal ERR rejects only that command and leaves the session usable.")} }
-                li { {tr(language, "CAPS dodává raw tokeny profilů, device ID a skutečně dostupné režimy; klient je nemá hádat.", "CAPS supplies raw profile tokens, device IDs and actually available modes; clients must not guess them.")} }
-                li { {tr(language, "Není potřeba klientská knihovna a neexistuje obecný raw-call příkaz.", "No client library is required and no generic raw-call command exists.")} }
+                li { {text(language, MessageId::DocsApiPane006)} }
+                li { {text(language, MessageId::DocsApiPane007)} }
+                li { {text(language, MessageId::DocsApiPane008)} }
+                li { {text(language, MessageId::DocsApiPane009)} }
+                li { {text(language, MessageId::DocsApiPane010)} }
             }
 
             div { class: "docs-api-flow",
@@ -672,7 +625,7 @@ fn ApiPane(active: DocsTab, language: Language) -> Element {
                 span { "→" }
                 code { "CAPS" }
                 span { "→" }
-                code { {tr(language, "typed příkaz", "typed command")} }
+                code { {text(language, MessageId::DocsApiPane011)} }
                 span { "→" }
                 code { "OK / ERR" }
             }
@@ -689,48 +642,32 @@ fn ProjectPane(active: DocsTab, language: Language) -> Element {
             role: "tabpanel",
             "aria-label": DocsTab::Project.label(language),
 
-            h3 { {tr(language, "Projekt", "Project")} }
+            h3 { {text(language, MessageId::CommonProject)} }
             div { class: "docs-project-grid",
-                div { span { {tr(language, "Balík", "Package")} } strong { "asense {VERSION}" } }
+                div { span { {text(language, MessageId::DocsProjectPane001)} } strong { "asense {VERSION}" } }
                 div { span { "Rust" } strong { "Edition 2024" } }
-                div { span { {tr(language, "Binárky", "Binaries")} } strong { "asense · asensed" } }
-                div { span { {tr(language, "Knihovna", "Library")} } strong { "asense_core" } }
-                div { span { {tr(language, "Autor", "Author")} } strong { "Fladirmacht" } }
-                div { span { {tr(language, "Licence", "License")} } strong { "GPL-2.0-only" } }
+                div { span { {text(language, MessageId::DocsProjectPane002)} } strong { "asense · asensed" } }
+                div { span { {text(language, MessageId::DocsProjectPane003)} } strong { "asense_core" } }
+                div { span { {text(language, MessageId::DocsProjectPane004)} } strong { "Fladirmacht" } }
+                div { span { {text(language, MessageId::CommonLicense)} } strong { "GPL-2.0-only" } }
             }
-            p { {tr(
-                language,
-                "ASense je poskytováno tak, jak je. GUI běží bez root práv a privilegované typed operace obsluhuje samostatný asensed.",
-                "ASense is provided as is. The GUI runs unprivileged and a separate asensed helper handles privileged typed operations.",
-            )} }
+            p { {text(language, MessageId::DocsProjectPane005)} }
 
-            h3 { {tr(language, "Odkazy", "Links")} }
+            h3 { {text(language, MessageId::DocsProjectPane006)} }
             div { class: "docs-links",
-                a { href: REPOSITORY_URL, {tr(language, "Zdrojový repozitář", "Source repository")} }
-                a { href: RELEASE_URL, {tr(language, "Poslední vydání", "Latest release")} }
+                a { href: REPOSITORY_URL, {text(language, MessageId::DocsProjectPane007)} }
+                a { href: RELEASE_URL, {text(language, MessageId::DocsProjectPane008)} }
                 a { href: "https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c", "Linux acer-wmi" }
-                a { href: "https://github.com/cleyton1986/predator-sense", "ENEK5130 research" }
+                a { href: "https://github.com/cleyton1986/predator-sense", {text(language, MessageId::DocsEnekResearch)} }
                 a { href: "mailto:fladirmacht@gmail.com", "fladirmacht@gmail.com" }
             }
 
-            h3 { {tr(language, "Vývoj a vydávání", "Development and releases")} }
-            p { {tr(
-                language,
-                "Release balíky obsahují samostatné GUI a GUI-free daemon binárky, source archive a SHA-256 kontrolní součty. CI kontroluje formát, Clippy, testy, build a DKMS. Podpora přes kernel se řídí upstream acer-wmi.",
-                "Release assets contain separate GUI and GUI-free daemon binaries, a source archive and SHA-256 checksums. CI checks formatting, Clippy, tests, builds and DKMS. Kernel-backed support follows upstream acer-wmi.",
-            )} }
+            h3 { {text(language, MessageId::DocsProjectPane009)} }
+            p { {text(language, MessageId::DocsProjectPane010)} }
 
-            h3 { {tr(language, "Licence a původ výzkumu", "License and research credit")} }
-            p { {tr(
-                language,
-                "ASense používá vlastní implementaci a testy. Veřejný výzkum wire protokolu ENEK5130 nezávisle zdokumentoval projekt predator-sense. Recovery fráze, privátní klíče ani extended privátní klíče Bitcoin peněženky nejsou v repozitáři ani release balících.",
-                "ASense uses its own implementation and tests. The predator-sense project independently documented public ENEK5130 wire-protocol research. Bitcoin wallet recovery phrases, private keys and extended private keys are never stored in the repository or release assets.",
-            )} }
-            p { class: "docs-note", {tr(
-                language,
-                "Úplný text GPL-2.0-only je v souboru LICENSE a postup vydání v docs/RELEASING.md ve zdrojovém repozitáři.",
-                "The complete GPL-2.0-only text is in LICENSE and the release procedure is in docs/RELEASING.md in the source repository.",
-            )} }
+            h3 { {text(language, MessageId::DocsProjectPane011)} }
+            p { {text(language, MessageId::DocsProjectPane012)} }
+            p { class: "docs-note", {text(language, MessageId::DocsProjectPane013)} }
         }
     }
 }
@@ -765,6 +702,7 @@ mod tests {
             assert!(ids.insert(tab.id()));
             assert!(!tab.label(Language::Czech).is_empty());
             assert!(!tab.label(Language::English).is_empty());
+            assert!(!tab.label(Language::SimplifiedChinese).is_empty());
         }
         assert_eq!(ids.len(), 5);
     }
@@ -787,6 +725,19 @@ mod tests {
         assert!(API_COMMANDS.contains("LIGHTING POWER"));
         assert!(API_COMMANDS.contains("BATTERY_CALIBRATION"));
         assert!(API_COMMANDS.contains("REAR_LOGO"));
+    }
+
+    #[test]
+    fn embedded_install_authorities_match_current_release_and_readme() {
+        let readme = include_str!("../../README.md");
+        let versioned_installer = format!("asense-v{VERSION}-ubuntu-26.04-x86_64-installer-*.zip");
+        assert!(STANDALONE_INSTALL.contains(&versioned_installer));
+        assert!(readme.contains(&versioned_installer));
+        assert!(STANDALONE_INSTALL.contains("./install.sh"));
+        assert!(AUR_INSTALL.contains("https://aur.archlinux.org/asense.git"));
+        assert!(AUR_INSTALL.contains("makepkg -si"));
+        assert!(AUR_INSTALL.contains("sudo asense-configure-user \"$USER\""));
+        assert!(readme.contains(AUR_URL));
     }
 
     #[test]
