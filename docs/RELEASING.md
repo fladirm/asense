@@ -6,7 +6,9 @@ users should follow the prebuilt installation path in the root README.
 ## Release baseline
 
 - Ubuntu 26.04 LTS, x86_64;
-- Rust 1.96.0 as pinned by `rust-toolchain.toml`;
+- the installed system Rust toolchain, whose exact `rustc`, `cargo`, `rustfmt`
+  and Clippy identities are recorded by the gate; the repository never invokes
+  `rustup`, installs a replacement toolchain or pins/downgrades the compiler;
 - matching headers for every locally installed kernel checked by the gate;
 - a completely clean Git worktree for packaging.
 

@@ -41,7 +41,8 @@ sudo apt install asense"#;
 
 const SOURCE_DEPENDENCIES: &str = r#"sudo apt update
 sudo apt install \
-  build-essential pkg-config git dkms "linux-headers-$(uname -r)" libelf-dev \
+  build-essential rustc cargo pkg-config git dkms \
+  "linux-headers-$(uname -r)" libelf-dev \
   libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
   desktop-file-utils python3 mokutil udev"#;
 
@@ -516,7 +517,11 @@ fn UsagePane(active: DocsTab, language: Language) -> Element {
 
             h3 { {tr(language, "Sestavení ze zdrojů", "Build from source")} }
             pre { code { "{SOURCE_DEPENDENCIES}" } }
-            p { {tr(language, "Nainstalujte Rust přes rustup a spusťte:", "Install Rust with rustup, then run:")} }
+            p { {tr(
+                language,
+                "Použijte Rust nainstalovaný operačním systémem; ASense jej neinstaluje, nepinuje ani nepřepisuje. Poté spusťte:",
+                "Use the Rust toolchain installed by the operating system; ASense does not install, pin or override it. Then run:",
+            )} }
             pre { code { "{SOURCE_BUILD}" } }
 
             h3 { {tr(language, "Chování ovládání", "Control behaviour")} }

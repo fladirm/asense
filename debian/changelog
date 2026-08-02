@@ -5,6 +5,9 @@ asense (0.3.0~rc1-1~local1) resolute; urgency=medium
   * Add passive profile, fan, platform, zoned-WMI and exact HID geometry
     diagnostics without exposing a generic firmware command surface.
   * Add a compact probe summary and synchronized privacy/support workflow.
+  * Use the externally installed system Rust toolchain for verification and
+    packaging, record its exact identity, and never install or pin one from the
+    ASense release path.
 
  -- Fladirmacht <fladirmacht@gmail.com>  Sat, 01 Aug 2026 23:30:00 +0200
 

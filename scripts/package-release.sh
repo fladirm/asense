@@ -4,40 +4,20 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command in rustup sed; do
+for command in cargo cut find getconf git grep head install mktemp rustc sed sha256sum sort strings touch uname zip; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'asense-release: missing command: %s\n' "$command" >&2
     exit 1
   }
 done
-[[ -f rust-toolchain.toml ]] || {
-  printf 'asense-release: rust-toolchain.toml is missing\n' >&2
+[[ ! -e rust-toolchain.toml ]] || {
+  printf 'asense-release: repository toolchain pins are forbidden; use the installed system Rust\n' >&2
   exit 1
 }
-pinned_toolchain="$(
-  sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    rust-toolchain.toml
-)"
-[[ -n "$pinned_toolchain" && "$pinned_toolchain" != *$'\n'* ]] || {
-  printf 'asense-release: could not resolve pinned repository Rust toolchain\n' >&2
-  exit 1
-}
-toolchain_cargo="$(rustup which --toolchain "$pinned_toolchain" cargo)" || {
-  printf 'asense-release: repository Cargo is not installed\n' >&2
-  exit 1
-}
-toolchain_bin="${toolchain_cargo%/*}"
-PATH="$toolchain_bin:$PATH"
-RUSTC="$toolchain_bin/rustc"
-RUSTDOC="$toolchain_bin/rustdoc"
-export PATH RUSTC RUSTDOC
-
-for command in cargo cut find getconf git grep head install mktemp rustc sha256sum sort strings touch uname zip; do
-  command -v "$command" >/dev/null 2>&1 || {
-    printf 'asense-release: missing command: %s\n' "$command" >&2
-    exit 1
-  }
-done
+asense_cargo_path="$(command -v cargo)"
+asense_rustc_path="$(command -v rustc)"
+printf 'asense-release: system Rust authority cargo=%s (%s) rustc=%s (%s)\n' \
+  "$asense_cargo_path" "$(cargo -V)" "$asense_rustc_path" "$(rustc -V)"
 
 worktree_status="$(git status --porcelain=v1 --untracked-files=all)"
 [[ -z "$worktree_status" ]] || {

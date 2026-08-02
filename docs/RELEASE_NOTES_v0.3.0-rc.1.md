@@ -32,6 +32,13 @@ Compatibility reports must capture observed behavior and the probe under the
 same ASense build, boot, loaded-module state and relevant AC/battery and control
 state. The GitHub issue forms now request that synchronization explicitly.
 
+### Build authority
+
+Source verification and release packaging use the Rust toolchain already
+installed in the build environment and record its exact executable paths and
+versions. ASense no longer contains a repository toolchain pin and its scripts
+do not install, switch or downgrade Rust.
+
 ### Hardware-support boundary
 
 This candidate does not assign a semantic meaning to raw Gaming-WMI profile

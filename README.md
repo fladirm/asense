@@ -262,12 +262,14 @@ Install build dependencies:
 ```bash
 sudo apt update
 sudo apt install \
-  build-essential pkg-config git dkms "linux-headers-$(uname -r)" libelf-dev \
+  build-essential rustc cargo pkg-config git dkms \
+  "linux-headers-$(uname -r)" libelf-dev \
   libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
   desktop-file-utils python3 mokutil udev
 ```
 
-Install Rust with `rustup`, then run:
+Use the Rust toolchain installed by the operating system. ASense does not
+install, pin, downgrade or override it. Then run:
 
 ```bash
 cargo test --locked

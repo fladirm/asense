@@ -28,11 +28,14 @@ jobs:
             libxdo-dev libssl-dev libelf-dev linux-headers-generic \
             desktop-file-utils udev
 
-      - name: Install Rust
+      - name: Record runner system Rust authority
         run: |
-          rustup toolchain install 1.96.0 \
-            --profile minimal --component clippy,rustfmt
-          rustup default 1.96.0
+          command -v rustc
+          rustc -Vv
+          command -v cargo
+          cargo -V
+          rustfmt -V
+          cargo clippy -V
 
       - name: Check formatting
         run: cargo fmt --all -- --check
