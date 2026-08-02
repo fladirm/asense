@@ -5,6 +5,8 @@ export CARGO_TARGET_DIR := $(CURDIR)/target/debian
 export CARGO_NET_OFFLINE := true
 export CARGO_PROFILE_RELEASE_STRIP := false
 export CARGO_PROFILE_RELEASE_DEBUG := 1
+asense_build_commit := $(shell if test -r .asense-build-commit; then sed -n '1p' .asense-build-commit; else git rev-parse --verify HEAD 2>/dev/null; fi)
+export ASENSE_BUILD_COMMIT := $(asense_build_commit)
 rustflag_separator := $(shell printf '\037')
 export CARGO_ENCODED_RUSTFLAGS := --remap-path-prefix=$(CURDIR)=/usr/src/asense$(rustflag_separator)--remap-path-prefix=$(HOME)=/usr/src/build-home
 
@@ -12,6 +14,7 @@ export CARGO_ENCODED_RUSTFLAGS := --remap-path-prefix=$(CURDIR)=/usr/src/asense$
 	dh $@ --with dkms
 
 override_dh_auto_configure:
+	printf '%s\n' "$(ASENSE_BUILD_COMMIT)" | grep -Eq '^[0-9a-f]{40}$$'
 	install -d -m 0755 "$(CARGO_HOME)"
 	install -m 0644 debian/cargo-config.toml "$(CARGO_HOME)/config.toml"
 

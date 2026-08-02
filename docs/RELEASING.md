@@ -138,6 +138,12 @@ lintian "../asense_${debian_version}_source.changes"
 dput ppa:fladirmacht/asense "../asense_${debian_version}_source.changes"
 ```
 
+The deterministic upstream component carries a generated
+`.asense-build-commit` authority. `debian/rules` validates its exact lowercase
+40-hex shape and exports it to the compiler, so a clean network-isolated
+Launchpad build retains the same commit provenance even though no `.git`
+directory is present.
+
 Record the signed `.dsc`, `.changes`, component checksums and signing
 fingerprint. Wait for Launchpad to publish both build and binary, inspect its
 log, then verify an `apt update` plus package-managed upgrade from the PPA.

@@ -41,6 +41,15 @@ trap 'rm -rf -- "$temporary"' EXIT INT TERM
 
 git archive --format=tar --prefix="asense-$version/" HEAD \
   >"$temporary/upstream.tar"
+stamp_root="$temporary/stamp/asense-$version"
+install -d -m 0755 "$stamp_root"
+printf '%s\n' "$commit" >"$stamp_root/.asense-build-commit"
+touch -d "@$source_date_epoch" "$stamp_root/.asense-build-commit"
+tar --mtime="@$source_date_epoch" \
+  --owner=0 --group=0 --numeric-owner --mode='u=rw,go=r' \
+  --pax-option=delete=atime,delete=ctime \
+  -C "$temporary/stamp" -rf "$temporary/upstream.tar" \
+  "asense-$version/.asense-build-commit"
 xz -9e --threads=1 --stdout "$temporary/upstream.tar" >"$temporary/upstream.tar.xz"
 
 cargo vendor --locked --versioned-dirs "$temporary/vendor" \

@@ -58,6 +58,14 @@ grep --fixed-strings --line-regexp \
 grep --fixed-strings --line-regexp \
   'export CARGO_ENCODED_RUSTFLAGS := --remap-path-prefix=$(CURDIR)=/usr/src/asense$(rustflag_separator)--remap-path-prefix=$(HOME)=/usr/src/build-home' \
   debian/rules >/dev/null
+grep --fixed-strings --line-regexp \
+  'export ASENSE_BUILD_COMMIT := $(asense_build_commit)' debian/rules >/dev/null
+grep --fixed-strings --line-regexp \
+  'stamp_root="$temporary/stamp/asense-$version"' \
+  scripts/package-debian-source.sh >/dev/null
+grep --fixed-strings --line-regexp \
+  '  "asense-$version/.asense-build-commit"' \
+  scripts/package-debian-source.sh >/dev/null
 
 printf '\n==> Arch source-package template\n'
 aur_test="$temporary/aur"
