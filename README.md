@@ -52,6 +52,7 @@ and RPM without fan writes, or lighting without battery options.
 | <code>PHN16S&#8209;71</code> | 🔎 | 🔎 | 🟡 | 🔎 |
 | <code>PHN16&#8209;73</code> | 🔎 | 🔎 | 🟡 | 🔎 |
 | <code>AN16S&#8209;61</code> | 🔎 | 🔎 | 🔎 | 🔎 |
+| <code>AN17&#8209;51</code> | 🟢 | 🟢 | 🟡 | 🔎 |
 | <code>AN515&#8209;45</code> | 🔎 | 🔎 | 🟡 | 🔎 |
 | <code>AN515&#8209;55</code> | 🔎 | 🔎 | 🟡 | 🔎 |
 | <code>AN515&#8209;56</code> | 🔎 | 🔎 | 🟡 | 🔎 |
