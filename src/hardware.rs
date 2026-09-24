@@ -314,6 +314,11 @@ struct ProfileInterface {
     backend: ProfileBackend,
     profile: PathBuf,
     choices: PathBuf,
+    /// acer_wmi's platform-profile handler maps the generic Linux
+    /// `performance` choice to the firmware's Turbo mode on every model it
+    /// drives (not just the reference model), and uses `balanced-performance`
+    /// for the firmware's own Performance mode.
+    performance_is_turbo: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -433,7 +438,11 @@ impl AcerHardware {
             .split_ascii_whitespace()
             .map(|raw| ProfileChoice {
                 raw: raw.to_string(),
-                label: profile_label(raw),
+                label: if profile.performance_is_turbo && raw == "performance" {
+                    "Turbo".to_string()
+                } else {
+                    profile_label(raw)
+                },
                 selectable: self.platform.acer
                     && raw != "custom"
                     && (!self.is_reference_model() || PlatformProfile::from_sysfs(raw).is_ok()),
@@ -870,6 +879,7 @@ fn discover_kernel_profile_interface(root: &Path) -> Option<ProfileInterface> {
                     backend: ProfileBackend::Kernel,
                     profile,
                     choices,
+                    performance_is_turbo: true,
                 });
             }
         }
@@ -886,6 +896,9 @@ fn discover_kernel_profile_interface(root: &Path) -> Option<ProfileInterface> {
             backend: ProfileBackend::Kernel,
             profile: legacy_profile,
             choices: legacy_choices,
+            // The legacy global file does not name its handler, so it may
+            // belong to a non-Acer driver whose `performance` is not Turbo.
+            performance_is_turbo: false,
         });
     }
 
@@ -906,6 +919,7 @@ fn discover_gaming_wmi_profile_interface(root: &Path) -> Option<ProfileInterface
             backend: ProfileBackend::AcerGamingWmi,
             profile,
             choices,
+            performance_is_turbo: false,
         });
     }
     None
@@ -1374,6 +1388,48 @@ mod tests {
                 .unwrap()
                 .trim(),
             "balanced"
+        );
+    }
+
+    #[test]
+    fn only_acer_wmi_handler_labels_its_performance_choice_turbo() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture
+                .root
+                .join("sys/firmware/acpi/platform_profile_choices"),
+            "low-power balanced balanced-performance performance\n",
+        )
+        .unwrap();
+        let label = |hardware: &AcerHardware, raw: &str| {
+            hardware
+                .profile_choices()
+                .unwrap()
+                .into_iter()
+                .find(|choice| choice.raw == raw)
+                .unwrap()
+                .label
+        };
+        // An unnamed legacy handler may belong to a non-Acer driver.
+        let legacy = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&legacy, "performance"), "Performance");
+
+        let handler = fixture
+            .root
+            .join("sys/class/platform-profile/platform-profile-0");
+        fs::create_dir_all(&handler).unwrap();
+        fs::write(handler.join("name"), "acer-wmi\n").unwrap();
+        fs::write(handler.join("profile"), "balanced\n").unwrap();
+        fs::write(
+            handler.join("choices"),
+            "low-power quiet balanced balanced-performance performance\n",
+        )
+        .unwrap();
+        let acer_wmi = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&acer_wmi, "performance"), "Turbo");
+        assert_eq!(
+            label(&acer_wmi, "balanced-performance"),
+            "Balanced performance"
         );
     }
 

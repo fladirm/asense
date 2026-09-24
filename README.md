@@ -77,6 +77,17 @@ PHN16-72 is the full reference platform. PHN14-51 has a known three-zone WMI
 layout; PHN16S-71 and PHN16-73 use ENEK5130 lighting. Yellow does not force a
 control: it still appears only after the controller answers correctly.
 
+Some Predator models that the in-kernel `acer_wmi` driver does not list yet,
+such as PHN16S-71, need its PredatorSense v4 support enabled explicitly. It
+exposes fan RPM, the CPU/GPU temperatures Manual fan mode requires, and the
+kernel platform profile (with `performance` as the firmware's Turbo mode)
+through the signed Ubuntu module, so it also works with Secure Boot:
+
+```bash
+echo "options acer_wmi predator_v4=1" | sudo tee /etc/modprobe.d/acer-wmi-predator.conf
+sudo update-initramfs -u
+```
+
 <!-- markdownlint-disable MD033 -->
 <details>
 <summary><strong>99 model and internal identifiers from the research inventory</strong></summary>

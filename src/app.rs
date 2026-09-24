@@ -340,7 +340,11 @@ fn render_ui_status(language: Language, status: &UiStatus) -> String {
     }
 }
 
-fn render_compact_status(language: Language, status: &UiStatus) -> String {
+fn render_compact_status(
+    language: Language,
+    status: &UiStatus,
+    performance_is_turbo: bool,
+) -> String {
     let id = match status {
         UiStatus::SettingsConfirmed => MessageId::StatusCompactSettingsVerified,
         UiStatus::LightingConfirmed => MessageId::StatusCompactLightingVerified,
@@ -356,7 +360,10 @@ fn render_compact_status(language: Language, status: &UiStatus) -> String {
             "quiet" => MessageId::StatusCompactProfileQuiet,
             "balanced" => MessageId::StatusCompactProfileBalanced,
             "balanced-performance" => MessageId::StatusCompactProfilePerformance,
-            "performance" => MessageId::StatusCompactProfileTurbo,
+            // See performance_is_turbo(): only acer_wmi's handler (and the
+            // reference model) alias "performance" to the firmware's Turbo.
+            "performance" if performance_is_turbo => MessageId::StatusCompactProfileTurbo,
+            "performance" => MessageId::StatusCompactProfilePerformance,
             _ => MessageId::StatusCompactProfileGeneric,
         },
         UiStatus::GpuProfileMismatch { .. } => MessageId::AppCompactStatus002,
@@ -1731,9 +1738,7 @@ fn apply_control_update(view: &mut AppState, update: ControlUpdate) {
             view.platform_profile_raw = Some(profile_raw.clone());
             let profile = profile_from_raw_for_machine(
                 &profile_raw,
-                view.capabilities
-                    .as_ref()
-                    .is_none_or(|capabilities| capabilities.reference_model),
+                performance_is_turbo(view.capabilities.as_ref()),
             );
             if let Some(profile) = profile {
                 view.platform_profile = profile;
@@ -1807,13 +1812,13 @@ fn apply_capability_snapshot(
     lighting: Result<KeyboardLightingState, String>,
     platform: Result<PlatformState, String>,
 ) -> (bool, Vec<UiDiagnostic>) {
-    let reference_model = capabilities.reference_model;
+    let turbo_alias = performance_is_turbo(Some(&capabilities));
     let acer_controls = capabilities.vendor.trim().eq_ignore_ascii_case("acer");
     view.platform_profile_raw = capabilities.profiles.current.clone();
     if let Some(profile) = view
         .platform_profile_raw
         .as_deref()
-        .and_then(|raw| profile_from_raw_for_machine(raw, reference_model))
+        .and_then(|raw| profile_from_raw_for_machine(raw, turbo_alias))
     {
         view.platform_profile = profile;
     }
@@ -2118,7 +2123,8 @@ fn apply_telemetry(view: &mut AppState, sample: SystemTelemetry) {
         view.profile_sync = ProfileTelemetrySync::default();
         view.platform_profile_raw = sample.profile_raw.clone();
         if let Some(raw) = sample.profile_raw.as_deref()
-            && let Some(profile) = profile_from_raw_for_machine(raw, false)
+            && let Some(profile) =
+                profile_from_raw_for_machine(raw, performance_is_turbo(view.capabilities.as_ref()))
         {
             view.platform_profile = profile;
         }
@@ -2239,8 +2245,24 @@ impl PlatformProfile {
     }
 }
 
-fn profile_from_raw_for_machine(raw: &str, reference_model: bool) -> Option<PlatformProfile> {
-    if !reference_model && raw == "performance" {
+/// Whether this machine's generic `performance` profile is the firmware's
+/// Turbo mode. True on the reference model and whenever the daemon reports
+/// that acer_wmi's platform-profile handler owns the profile (it maps
+/// `performance` to Turbo on every model it drives); false for Acer's own
+/// Gaming-WMI fallback, where `performance` is a distinct lower tier.
+fn performance_is_turbo(capabilities: Option<&ControlCapabilities>) -> bool {
+    capabilities.is_none_or(|capabilities| {
+        capabilities.reference_model
+            || capabilities
+                .profiles
+                .choices
+                .iter()
+                .any(|choice| choice.raw == "performance" && choice.label == "Turbo")
+    })
+}
+
+fn profile_from_raw_for_machine(raw: &str, performance_is_turbo: bool) -> Option<PlatformProfile> {
+    if !performance_is_turbo && raw == "performance" {
         return Some(PlatformProfile::Performance);
     }
     PlatformProfile::from_raw(raw)
@@ -2249,9 +2271,9 @@ fn profile_from_raw_for_machine(raw: &str, reference_model: bool) -> Option<Plat
 fn profile_label_for_machine(
     raw: &str,
     language: Language,
-    reference_model: bool,
+    performance_is_turbo: bool,
 ) -> Option<&'static str> {
-    profile_from_raw_for_machine(raw, reference_model).map(|profile| profile.label(language))
+    profile_from_raw_for_machine(raw, performance_is_turbo).map(|profile| profile.label(language))
 }
 
 fn profile_display_label(
@@ -2266,8 +2288,9 @@ fn profile_display_label(
         }
         return fallback.label(language).to_string();
     };
-    let reference_model = capabilities.is_none_or(|capabilities| capabilities.reference_model);
-    if let Some(label) = profile_label_for_machine(raw, language, reference_model) {
+    if let Some(label) =
+        profile_label_for_machine(raw, language, performance_is_turbo(capabilities))
+    {
         return label.to_string();
     }
     capabilities
@@ -2559,7 +2582,11 @@ fn Dashboard(
     let mut docs_open = use_signal(|| false);
     let telemetry = state.telemetry.clone();
     let localized_control_status = render_ui_status(language, &state.status);
-    let compact_control_status = render_compact_status(language, &state.status);
+    let compact_control_status = render_compact_status(
+        language,
+        &state.status,
+        performance_is_turbo(state.capabilities.as_ref()),
+    );
     let telemetry_status = render_telemetry_status(language, state.telemetry_health);
     let localized_status_message = telemetry_status.as_ref().map_or_else(
         || localized_control_status.clone(),
@@ -3052,11 +3079,9 @@ fn ControlDock(
         },
         |capabilities| capabilities.profiles.choices.clone(),
     );
-    let reference_model = capabilities
-        .as_ref()
-        .is_none_or(|capabilities| capabilities.reference_model);
+    let turbo_alias = performance_is_turbo(capabilities.as_ref());
     for choice in &mut profile_choices {
-        if let Some(label) = profile_label_for_machine(&choice.raw, language, reference_model) {
+        if let Some(label) = profile_label_for_machine(&choice.raw, language, turbo_alias) {
             choice.label = label.to_string();
         }
     }
@@ -5241,7 +5266,7 @@ mod tests {
                     render_ui_status(language, status),
                     super::text(language, *expected)
                 );
-                assert!(!render_compact_status(language, status).is_empty());
+                assert!(!render_compact_status(language, status, true).is_empty());
             }
         }
 
@@ -5331,7 +5356,7 @@ mod tests {
                     )));
                 }
                 assert_eq!(
-                    render_compact_status(language, &status),
+                    render_compact_status(language, &status, true),
                     super::text(language, *compact_id)
                 );
             }
@@ -5382,7 +5407,7 @@ mod tests {
             }
             assert!(rendered.contains(&fields));
             assert_eq!(
-                render_compact_status(language, &partial),
+                render_compact_status(language, &partial, true),
                 super::text(language, super::MessageId::AppCompactStatus001)
             );
 
@@ -5395,7 +5420,7 @@ mod tests {
                 )
             );
             assert_eq!(
-                render_compact_status(language, &readback),
+                render_compact_status(language, &readback, true),
                 super::text(language, super::MessageId::AppCompactStatus001)
             );
 
@@ -5407,7 +5432,7 @@ mod tests {
             assert!(mismatch_rendered.contains("core -125"));
             assert!(mismatch_rendered.contains("VRAM +250 MHz"));
             assert_eq!(
-                render_compact_status(language, &mismatch),
+                render_compact_status(language, &mismatch, true),
                 super::text(language, super::MessageId::AppCompactStatus002)
             );
 
@@ -5437,7 +5462,7 @@ mod tests {
                     format!("{}: bounded-raw-detail", super::text(language, id))
                 );
                 assert_eq!(
-                    render_compact_status(language, &failure),
+                    render_compact_status(language, &failure, true),
                     super::text(language, id)
                 );
             }
@@ -5493,7 +5518,7 @@ mod tests {
             render_ui_status(Language::SimplifiedChinese, &status).starts_with("风扇设置失败: ")
         );
         assert_eq!(
-            render_compact_status(Language::SimplifiedChinese, &status),
+            render_compact_status(Language::SimplifiedChinese, &status, true),
             super::text(
                 Language::SimplifiedChinese,
                 super::MessageId::StatusFanFailure
@@ -5555,18 +5580,24 @@ mod tests {
             power: None,
         });
         assert_eq!(
-            render_compact_status(Language::Czech, &turbo),
+            render_compact_status(Language::Czech, &turbo, true),
             "Turbo potvrzeno"
         );
         assert_eq!(
-            render_compact_status(Language::English, &turbo),
+            render_compact_status(Language::English, &turbo, true),
             "Turbo verified"
+        );
+        // Acer's Gaming-WMI fallback uses "performance" for a distinct,
+        // lower tier than Turbo, so it must not be announced as Turbo.
+        assert_eq!(
+            render_compact_status(Language::English, &turbo, false),
+            "Performance verified"
         );
         let partial = UiStatus::PartialCapabilities(vec![UiDiagnostic::Lighting(
             super::RawDetail::new("temporary RGB readback failure"),
         )]);
         assert_eq!(
-            render_compact_status(Language::English, &partial),
+            render_compact_status(Language::English, &partial, true),
             "Partial readback"
         );
         let mismatch = UiStatus::GpuProfileMismatch {
@@ -5574,7 +5605,7 @@ mod tests {
             memory_mhz: 200,
         };
         assert_eq!(
-            render_compact_status(Language::Czech, &mismatch),
+            render_compact_status(Language::Czech, &mismatch, true),
             "GPU nesedí"
         );
         let failure = UiStatus::Failure {
@@ -5584,7 +5615,7 @@ mod tests {
             ),
         };
         assert_eq!(
-            render_compact_status(Language::English, &failure),
+            render_compact_status(Language::English, &failure, true),
             "State refresh failed"
         );
         for status in [
@@ -5609,7 +5640,7 @@ mod tests {
             "Applied · state readback unavailable"
         );
         assert_eq!(
-            render_compact_status(Language::English, &lighting_apply_status(false)),
+            render_compact_status(Language::English, &lighting_apply_status(false), true),
             "Last applied"
         );
         assert_eq!(
@@ -5617,7 +5648,7 @@ mod tests {
             "Lighting confirmed by firmware"
         );
         assert_eq!(
-            render_compact_status(Language::Czech, &UiStatus::LightingConfirmed),
+            render_compact_status(Language::Czech, &UiStatus::LightingConfirmed, true),
             "Podsvícení potvrzeno"
         );
     }
@@ -5823,6 +5854,72 @@ mod tests {
             Some(super::PlatformIssue::Raw(super::RawDetail::new(
                 "platform unavailable"
             )))
+        );
+    }
+
+    #[test]
+    fn acer_wmi_performance_choice_is_labeled_turbo_on_any_model() {
+        let capabilities = |reference_model: bool, performance_label: &str| ControlCapabilities {
+            vendor: "Acer".to_string(),
+            product: "Predator PHN16S-71".to_string(),
+            reference_model,
+            profiles: ControlProfileCapabilities {
+                backend: Some(crate::control::CapabilityProfileBackend::Kernel),
+                choices: ["balanced", "balanced-performance", "performance"]
+                    .into_iter()
+                    .map(|raw| crate::control::ControlProfileChoice {
+                        raw: raw.to_string(),
+                        label: if raw == "performance" {
+                            performance_label.to_string()
+                        } else {
+                            raw.to_string()
+                        },
+                        selectable: true,
+                    })
+                    .collect(),
+                current: Some("performance".to_string()),
+            },
+            fans: ControlFanCapabilities {
+                backend: None,
+                rpm_channels: Vec::new(),
+                auto: false,
+                manual: false,
+                maximum: false,
+            },
+            lighting: Vec::new(),
+            platform: ControlPlatformCapabilities::default(),
+        };
+        // The daemon labels acer_wmi's "performance" choice Turbo; the GUI
+        // must follow it on non-reference models instead of showing two
+        // identical "Performance" buttons.
+        assert!(super::performance_is_turbo(Some(&capabilities(
+            false, "Turbo"
+        ))));
+        assert!(super::performance_is_turbo(Some(&capabilities(
+            true,
+            "Performance"
+        ))));
+        assert!(!super::performance_is_turbo(Some(&capabilities(
+            false,
+            "Performance"
+        ))));
+        assert_eq!(
+            super::profile_display_label(
+                Some("performance"),
+                PlatformProfile::Balanced,
+                Some(&capabilities(false, "Turbo")),
+                Language::English,
+            ),
+            "Turbo"
+        );
+        assert_eq!(
+            super::profile_display_label(
+                Some("balanced-performance"),
+                PlatformProfile::Balanced,
+                Some(&capabilities(false, "Turbo")),
+                Language::English,
+            ),
+            "Performance"
         );
     }
 
