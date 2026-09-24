@@ -20,17 +20,6 @@ const REFERENCE_PRODUCT: &str = "Predator PHN16-72";
 const GAMING_WMI_GUID: &str = "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56";
 const PWM_MAX: u32 = 255;
 
-// The PHN16S-71 (board FTYPE_ARX) registers no `acer`/`acer-wmi` hwmon
-// device, so ASense has no branded source to safety-gate manual fan speed
-// on this board. Its firmware already exposes matching values through
-// generic ACPI thermal zones (confirmed live against coretemp and the
-// NVIDIA driver's own GPU reading), so this narrow, exact-product fallback
-// lets the existing thermal watchdog use them instead. Scoped to this exact
-// model so an unrelated board's same zone names cannot be misattributed.
-const ARX_ACPI_THERMAL_PRODUCT: &str = "Predator PHN16S-71";
-const ARX_ACPI_THERMAL_CPU_ZONE: &str = "TCPU";
-const ARX_ACPI_THERMAL_GPU_ZONE: &str = "SEN4";
-
 #[derive(Debug)]
 pub enum HardwareError {
     Io {
@@ -309,35 +298,8 @@ pub struct AcerHardware {
     platform: VerifiedPlatform,
     root: PathBuf,
     hwmon: Option<PathBuf>,
-    temperature_source: Option<TemperatureSource>,
     profile: Option<ProfileInterface>,
     fan_backend: Option<FanInterface>,
-}
-
-/// Where CPU/GPU temperature is read from for the manual-fan-mode safety
-/// gate and the thermal watchdog. Normally the branded Acer hwmon device;
-/// `AcpiThermalZones` is a narrow, exact-model fallback for boards that
-/// don't register one (see `ARX_ACPI_THERMAL_PRODUCT`).
-#[derive(Clone, Debug)]
-enum TemperatureSource {
-    AcerHwmon(PathBuf),
-    AcpiThermalZones { cpu: PathBuf, gpu: PathBuf },
-}
-
-impl TemperatureSource {
-    fn path_for(&self, channel: u8) -> Result<PathBuf, HardwareError> {
-        match self {
-            Self::AcerHwmon(base) => Ok(acer_temperature_path(base, channel)),
-            Self::AcpiThermalZones { cpu, gpu } => match channel {
-                1 => Ok(cpu.clone()),
-                2 => Ok(gpu.clone()),
-                _ => Err(HardwareError::InvalidValue {
-                    field: "temperature channel",
-                    value: channel.to_string(),
-                }),
-            },
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -352,6 +314,11 @@ struct ProfileInterface {
     backend: ProfileBackend,
     profile: PathBuf,
     choices: PathBuf,
+    /// acer_wmi's platform-profile handler maps the generic Linux
+    /// `performance` choice to the firmware's Turbo mode on every model it
+    /// drives (not just the reference model), and uses `balanced-performance`
+    /// for the firmware's own Performance mode.
+    performance_is_turbo: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -390,12 +357,6 @@ impl AcerHardware {
         // Optional kernel and WMI surfaces are independent capability planes.
         // A transient I/O failure in one probe must not hide the others.
         let hwmon = platform.acer.then(|| discover_acer_hwmon(&root)).flatten();
-        let temperature_source = hwmon.clone().map(TemperatureSource::AcerHwmon).or_else(|| {
-            platform
-                .acer
-                .then(|| discover_acpi_thermal_fallback(&root, &platform))
-                .flatten()
-        });
         let kernel_profile = discover_kernel_profile_interface(&root);
         let gaming_profile = platform
             .acer
@@ -406,7 +367,7 @@ impl AcerHardware {
             .acer
             .then(|| {
                 discover_kernel_fan_interface(hwmon.as_deref())
-                    .or_else(|| discover_gaming_wmi_fan_interface(&root, temperature_source.as_ref()))
+                    .or_else(|| discover_gaming_wmi_fan_interface(&root, hwmon.as_deref()))
             })
             .flatten();
 
@@ -414,7 +375,6 @@ impl AcerHardware {
             platform,
             root,
             hwmon,
-            temperature_source,
             profile,
             fan_backend,
         })
@@ -478,16 +438,13 @@ impl AcerHardware {
             .split_ascii_whitespace()
             .map(|raw| ProfileChoice {
                 raw: raw.to_string(),
-                label: profile_label(raw),
+                label: if profile.performance_is_turbo && raw == "performance" {
+                    "Turbo".to_string()
+                } else {
+                    profile_label(raw)
+                },
                 selectable: self.platform.acer
                     && raw != "custom"
-                    // Confirmed live on a Predator PHN16S-71: the firmware
-                    // read back a legitimate "turbo" profile code, but
-                    // writing it back through this same WMI method was
-                    // rejected with a remote I/O error. Treat it as
-                    // informational-only until a board where the write is
-                    // known to succeed is found.
-                    && raw != "turbo"
                     && (!self.is_reference_model() || PlatformProfile::from_sysfs(raw).is_ok()),
             })
             .collect())
@@ -592,11 +549,12 @@ impl AcerHardware {
     }
 
     pub(crate) fn read_acer_temp_millidegrees(&self, channel: u8) -> Result<i64, HardwareError> {
-        let source = self
-            .temperature_source
+        let base = self
+            .hwmon
             .as_ref()
             .ok_or(HardwareError::AcerHwmonNotFound)?;
-        parse_value(&source.path_for(channel)?, "temperature")
+        let path = acer_temperature_path(base, channel);
+        parse_value(&path, "temperature")
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -921,6 +879,7 @@ fn discover_kernel_profile_interface(root: &Path) -> Option<ProfileInterface> {
                     backend: ProfileBackend::Kernel,
                     profile,
                     choices,
+                    performance_is_turbo: true,
                 });
             }
         }
@@ -937,6 +896,9 @@ fn discover_kernel_profile_interface(root: &Path) -> Option<ProfileInterface> {
             backend: ProfileBackend::Kernel,
             profile: legacy_profile,
             choices: legacy_choices,
+            // The legacy global file does not name its handler, so it may
+            // belong to a non-Acer driver whose `performance` is not Turbo.
+            performance_is_turbo: false,
         });
     }
 
@@ -957,6 +919,7 @@ fn discover_gaming_wmi_profile_interface(root: &Path) -> Option<ProfileInterface
             backend: ProfileBackend::AcerGamingWmi,
             profile,
             choices,
+            performance_is_turbo: false,
         });
     }
     None
@@ -988,10 +951,7 @@ fn discover_kernel_fan_interface(hwmon: Option<&Path>) -> Option<FanInterface> {
     None
 }
 
-fn discover_gaming_wmi_fan_interface(
-    root: &Path,
-    temperature_source: Option<&TemperatureSource>,
-) -> Option<FanInterface> {
+fn discover_gaming_wmi_fan_interface(root: &Path, hwmon: Option<&Path>) -> Option<FanInterface> {
     let base = find_wmi_group(
         &rooted(root, "sys/bus/wmi/devices"),
         GAMING_WMI_GUID,
@@ -1008,11 +968,9 @@ fn discover_gaming_wmi_fan_interface(
     if !behavior_is_readable {
         return None;
     }
-    let temperatures_are_readable = temperature_source.is_some_and(|source| {
+    let temperatures_are_readable = hwmon.is_some_and(|base| {
         (1_u8..=2).all(|channel| {
-            source
-                .path_for(channel)
-                .is_ok_and(|path| parse_value::<i64>(&path, "temperature").is_ok())
+            parse_value::<i64>(&acer_temperature_path(base, channel), "temperature").is_ok()
         })
     });
     let manual = temperatures_are_readable
@@ -1021,33 +979,6 @@ fn discover_gaming_wmi_fan_interface(
                 .is_ok_and(|value| value <= 100)
         });
     Some(FanInterface::AcerGamingWmi { base, manual })
-}
-
-/// Narrow, exact-model fallback temperature source for boards with no
-/// Acer-branded hwmon device. See `ARX_ACPI_THERMAL_PRODUCT`.
-fn discover_acpi_thermal_fallback(root: &Path, platform: &VerifiedPlatform) -> Option<TemperatureSource> {
-    if platform.product != ARX_ACPI_THERMAL_PRODUCT {
-        return None;
-    }
-    let thermal_root = rooted(root, "sys/class/thermal");
-    let entries = fs::read_dir(&thermal_root).ok()?;
-    let mut cpu = None;
-    let mut gpu = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(zone_type) = fs::read_to_string(path.join("type")) else {
-            continue;
-        };
-        match zone_type.trim() {
-            ARX_ACPI_THERMAL_CPU_ZONE => cpu = Some(path.join("temp")),
-            ARX_ACPI_THERMAL_GPU_ZONE => gpu = Some(path.join("temp")),
-            _ => {}
-        }
-    }
-    Some(TemperatureSource::AcpiThermalZones {
-        cpu: cpu?,
-        gpu: gpu?,
-    })
 }
 
 fn acer_temperature_path(base: &Path, channel: u8) -> PathBuf {
@@ -1457,6 +1388,48 @@ mod tests {
                 .unwrap()
                 .trim(),
             "balanced"
+        );
+    }
+
+    #[test]
+    fn only_acer_wmi_handler_labels_its_performance_choice_turbo() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture
+                .root
+                .join("sys/firmware/acpi/platform_profile_choices"),
+            "low-power balanced balanced-performance performance\n",
+        )
+        .unwrap();
+        let label = |hardware: &AcerHardware, raw: &str| {
+            hardware
+                .profile_choices()
+                .unwrap()
+                .into_iter()
+                .find(|choice| choice.raw == raw)
+                .unwrap()
+                .label
+        };
+        // An unnamed legacy handler may belong to a non-Acer driver.
+        let legacy = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&legacy, "performance"), "Performance");
+
+        let handler = fixture
+            .root
+            .join("sys/class/platform-profile/platform-profile-0");
+        fs::create_dir_all(&handler).unwrap();
+        fs::write(handler.join("name"), "acer-wmi\n").unwrap();
+        fs::write(handler.join("profile"), "balanced\n").unwrap();
+        fs::write(
+            handler.join("choices"),
+            "low-power quiet balanced balanced-performance performance\n",
+        )
+        .unwrap();
+        let acer_wmi = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&acer_wmi, "performance"), "Turbo");
+        assert_eq!(
+            label(&acer_wmi, "balanced-performance"),
+            "Balanced performance"
         );
     }
 

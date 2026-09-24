@@ -78,13 +78,6 @@
 
 #define ASENSE_PROFILE_QUIET 0x00
 #define ASENSE_PROFILE_BALANCED 0x01
-/*
- * Confirmed live on a Predator PHN16S-71 (board FTYPE_ARX): PredatorSense
- * showed Turbo already selected immediately after a reboot whose Linux side
- * had just read this exact byte from ASENSE_PROFILE_GET, with no profile
- * write in between.
- */
-#define ASENSE_PROFILE_TURBO 0x02
 #define ASENSE_PROFILE_BALANCED_PERFORMANCE 0x04
 #define ASENSE_PROFILE_PERFORMANCE 0x05
 #define ASENSE_PROFILE_LOW_POWER 0x06
@@ -229,7 +222,6 @@ static const struct asense_profile_choice asense_profile_choices[] = {
 	{ ASENSE_PROFILE_BALANCED, "balanced" },
 	{ ASENSE_PROFILE_BALANCED_PERFORMANCE, "balanced-performance" },
 	{ ASENSE_PROFILE_PERFORMANCE, "performance" },
-	{ ASENSE_PROFILE_TURBO, "turbo" },
 };
 
 static const struct asense_zoned_quirk asense_zoned_quirks[] = {
@@ -567,30 +559,13 @@ static int asense_write_profile(struct asense_rgb *rgb, u8 profile)
 	return asense_gaming_set(rgb, ASENSE_MISC_SET, payload);
 }
 
-/*
- * Verified live via PredatorSense correlation on exactly this model and
- * BIOS family: reboot into Windows with no profile write in between showed
- * Turbo already active immediately after Linux had read back 0x02. Acer's
- * per-board WMI profile codes are not guaranteed identical across the
- * whole Predator lineup, so this stays scoped to the confirmed model
- * instead of joining the shared table unconditionally.
- */
-static bool asense_arx_turbo_supported(void)
-{
-	return dmi_match(DMI_PRODUCT_NAME, "Predator PHN16S-71");
-}
-
 static const struct asense_profile_choice *asense_profile_by_value(u8 value)
 {
 	unsigned int index;
 
-	for (index = 0; index < ARRAY_SIZE(asense_profile_choices); index++) {
-		if (asense_profile_choices[index].value != value)
-			continue;
-		if (value == ASENSE_PROFILE_TURBO && !asense_arx_turbo_supported())
-			return NULL;
-		return &asense_profile_choices[index];
-	}
+	for (index = 0; index < ARRAY_SIZE(asense_profile_choices); index++)
+		if (asense_profile_choices[index].value == value)
+			return &asense_profile_choices[index];
 	return NULL;
 }
 
@@ -598,14 +573,9 @@ static const struct asense_profile_choice *asense_profile_by_name(const char *na
 {
 	unsigned int index;
 
-	for (index = 0; index < ARRAY_SIZE(asense_profile_choices); index++) {
-		if (!sysfs_streq(name, asense_profile_choices[index].name))
-			continue;
-		if (asense_profile_choices[index].value == ASENSE_PROFILE_TURBO &&
-		    !asense_arx_turbo_supported())
-			return NULL;
-		return &asense_profile_choices[index];
-	}
+	for (index = 0; index < ARRAY_SIZE(asense_profile_choices); index++)
+		if (sysfs_streq(name, asense_profile_choices[index].name))
+			return &asense_profile_choices[index];
 	return NULL;
 }
 
@@ -1912,9 +1882,6 @@ out:
 static ssize_t choices_show(struct device *dev, struct device_attribute *attr,
 			    char *buffer)
 {
-	if (asense_arx_turbo_supported())
-		return sysfs_emit(buffer,
-			"low-power quiet balanced balanced-performance performance turbo\n");
 	return sysfs_emit(buffer,
 		"low-power quiet balanced balanced-performance performance\n");
 }
