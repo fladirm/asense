@@ -12,6 +12,7 @@ assets/asense.desktop usr/share/applications
 assets/asense.svg usr/share/icons/hicolor/scalable/apps
 debian/io.github.fladirm.asense.metainfo.xml usr/share/metainfo
 debian/asense-configure-user usr/sbin
-kernel/asense_rgb.c usr/src/asense-rgb-0.3.0
-kernel/Makefile usr/src/asense-rgb-0.3.0
-kernel/LICENSE usr/src/asense-rgb-0.3.0
+kernel/asense_rgb.c usr/src/asense-rgb-0.4.0
+kernel/asense_rgb_policy.h usr/src/asense-rgb-0.4.0
+kernel/Makefile usr/src/asense-rgb-0.4.0
+kernel/LICENSE usr/src/asense-rgb-0.4.0

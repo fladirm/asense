@@ -200,7 +200,7 @@ for modules in /lib/modules/*; do
   release="${modules##*/}"
   kernel_work="$temporary/kernel-$release"
   install -d "$kernel_work"
-  install -m 0644 kernel/Makefile kernel/asense_rgb.c "$kernel_work/"
+  install -m 0644 kernel/Makefile kernel/asense_rgb.c kernel/asense_rgb_policy.h "$kernel_work/"
   run make -C "$modules/build" M="$kernel_work" modules
   kernel_count=$((kernel_count + 1))
 done

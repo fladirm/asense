@@ -1,0 +1,58 @@
+[
+  {
+    "id": "phn16s-71-gui-timeout",
+    "file": "phn16s-71-gui-timeout.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/1",
+    "source_url": "https://github.com/user-attachments/files/30660074/asense-probe-auto.json",
+    "sha256": "223efb6789562323de69d33471cd36e1b81137a8a2d68b8a21cf5884b2f77e21",
+    "context": "Original public report; transport and physical confirmation remain independent."
+  },
+  {
+    "id": "ph18-73-auto-unknown-profile",
+    "file": "ph18-73-auto-unknown-profile.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/2",
+    "source_url": "https://github.com/user-attachments/files/30632569/ph18-fan-auto.json",
+    "sha256": "681e4d77cd95c6700ed2133651b1f6a0fcd7908f51edc60d22bb03c82c8220de",
+    "context": "Original public report; transport and physical confirmation remain independent."
+  },
+  {
+    "id": "ph18-73-maximum-no-rpm",
+    "file": "ph18-73-maximum-no-rpm.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/2",
+    "source_url": "https://github.com/user-attachments/files/30632571/ph18-fan-maximum.json",
+    "sha256": "506fa42a9c25f739990b4f1208a48d0731fded7a4328a15915628e49598e7443",
+    "context": "Original public report; transport and physical confirmation remain independent."
+  },
+  {
+    "id": "ph16-72-darfon-variant",
+    "file": "ph16-72-darfon-variant.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/3",
+    "source_url": "https://github.com/user-attachments/files/30850308/asense-probe.json",
+    "sha256": "90b13e925d2d94cdfd82a2784673893868d96d535887aa8e75c3c442175ed2e8",
+    "context": "Original public report; transport and physical confirmation remain independent."
+  },
+  {
+    "id": "phn16-72-fedora-gui-timeout",
+    "file": "phn16-72-fedora-gui-timeout.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/6",
+    "source_url": "https://github.com/user-attachments/files/31534633/asense-probe.json",
+    "sha256": "4932da1eaa218edf34ace7c85876e16cad942a660d924d2f4c8ad9fce9e9abd3",
+    "context": "Original public report; transport and physical confirmation remain independent."
+  },
+  {
+    "id": "an14-41-fans-without-temperatures",
+    "file": "an14-41-fans-without-temperatures.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/8",
+    "source_url": "https://github.com/user-attachments/files/32122719/asense-probe-an14-41.json",
+    "sha256": "f8f391d0d9d43d758b789d537efc688f40b3529e6dc8c94d7c6dee00c4f7b424",
+    "context": "Original public report; transport and physical confirmation remain independent."
+  },
+  {
+    "id": "an14-41-patched-boot-lighting",
+    "file": "an14-41-patched-boot-lighting.json",
+    "source_issue": "https://github.com/fladirm/asense/issues/9",
+    "source_url": "https://github.com/user-attachments/files/32160086/asense-probe.json",
+    "sha256": "cdface00a226010f7d4633f60d7df9c43f0a34f9420d481e6ef65212aae1865e",
+    "context": "Reporter used the AN14-41-specific test workaround; this is not a stock support proof."
+  }
+]

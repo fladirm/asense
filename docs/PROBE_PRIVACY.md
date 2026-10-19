@@ -1,13 +1,12 @@
 # ASense probe privacy and support workflow
 
 `asense probe` creates a local, bounded compatibility report. It does not
-upload the report or contact a remote service. The schema-3 JSON is the support
+upload the report or contact a remote service. The schema-4 JSON is the support
 authority; the human-readable summary is only a derived convenience view.
 
 ## Commands
 
-Close the ASense window so the one-shot command can use the daemon's single
-control session, then run:
+The GUI may remain open while the probe connects. Run:
 
 ```bash
 asense probe > asense-probe.json
@@ -34,7 +33,7 @@ The default probe:
 
 It does not call `CAPS`, select an ENEK target with A2, send A3/A4 lighting
 commands, write a profile/fan/platform control, use a generic EC/WMI/HID
-executor, query NVIDIA hardware or wake a suspended discrete GPU. Schema 3
+executor, query NVIDIA hardware or wake a suspended discrete GPU. Schema 4
 records `mode: "passive"`, `automatic_upload: false` and an empty
 `default_mutations` list. A non-empty default mutation list is invalid.
 
@@ -105,5 +104,9 @@ probe actually captured. Record the behavior and generate the report with:
 
 If any of these changes, reproduce the behavior and capture a new report. State
 whether suspend/resume or a live AC plug/unplug occurred. Screenshots and prose
-without synchronized schema-3 evidence are useful observations, but they are
+without synchronized schema-4 evidence are useful observations, but they are
 not sufficient authority for a new hardware mapping.
+
+See [schema 4](PROBE_SCHEMA_V4.md) for USB candidate collection and backward
+reading of the original schema-3 reports. Darfon discovery reads descriptors
+only and sends no feature requests to that USB controller.

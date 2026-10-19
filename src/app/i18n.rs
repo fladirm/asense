@@ -1441,16 +1441,16 @@ const fn entry(id: MessageId) -> CatalogEntry {
             en: "Run, probe and uninstall",
         },
         MessageId::DocsUsagePane006 => CatalogEntry {
-            cs: "Před spuštěním probe zavřete okno ASense, aby jednorázový dotaz mohl použít jedinou control session daemonu.",
-            en: "Close the ASense window before running the probe so its one-shot request can use the daemon's single control session.",
+            cs: "Probe lze spustit i s otevřeným oknem ASense. GUI a daemon aktualizujte společně.",
+            en: "The probe can run while the ASense window is open. Upgrade the GUI and daemon together.",
         },
         MessageId::DocsUsagePane007 => CatalogEntry {
-            cs: "Probe vytvoří autoritativní schema-3 JSON s modelem, napájením, profily, ventilátory a známými WMI/HID transporty. Daemonu po HELLO 2 posílá pouze pevný read-only požadavek DIAG PASSIVE; nevolá obecné capability discovery, neposílá ENEK selector ani setter a nic neuploaduje. Vynechává serialy, UUID, hostname, identitu uživatele, sítě, bootu a úložiště, HID fyzické cesty, journal, surové ACPI tabulky, absolutní cesty a prostředí procesu. Volba --summary je jen čitelný souhrn nové capture; JSON před sdílením zkontrolujte.",
-            en: "The probe creates the authoritative schema-3 JSON with model, power, profile, fan and known WMI/HID transport evidence. After HELLO 2 it sends only the fixed read-only DIAG PASSIVE request to the daemon; it does not call general capability discovery, send an ENEK selector or setter, or upload anything. It omits serials, UUIDs, hostname, user, network, boot and storage identity, HID physical paths, journals, raw ACPI tables, absolute paths and the process environment. --summary is only a readable view of a fresh capture; review the JSON before sharing.",
+            cs: "Probe vytvoří autoritativní schema-4 JSON s modelem, napájením, profily, ventilátory a známými WMI/HID transporty. Daemonu po HELLO 2 posílá pouze pevný read-only požadavek DIAG PASSIVE; nevolá obecné capability discovery, neposílá ENEK selector ani setter a nic neuploaduje. Vynechává serialy, UUID, hostname, identitu uživatele, sítě, bootu a úložiště, HID fyzické cesty, journal, surové ACPI tabulky, absolutní cesty a prostředí procesu. Volba --summary je jen čitelný souhrn nové capture; JSON před sdílením zkontrolujte.",
+            en: "The probe creates the authoritative schema-4 JSON with model, power, profile, fan and known WMI/HID transport evidence. After HELLO 2 it sends only the fixed read-only DIAG PASSIVE request to the daemon; it does not call general capability discovery, send an ENEK selector or setter, or upload anything. It omits serials, UUIDs, hostname, user, network, boot and storage identity, HID physical paths, journals, raw ACPI tables, absolute paths and the process environment. --summary is only a readable view of a fresh capture; review the JSON before sharing.",
         },
         MessageId::DocsUsagePane008 => CatalogEntry {
-            cs: "Odinstalace vrátí aktivní fan session do Auto a odstraní služby, DKMS, HWDB, udev pravidla a desktop položku. Profil, podsvícení a další firmware volby zůstávají nastavené.",
-            en: "Uninstall returns an active fan session to Auto and removes services, DKMS, HWDB, udev integration and the desktop entry. Profile, lighting and other firmware choices remain configured.",
+            cs: "Odinstalace požádá ventilátory o Auto a ověří odpověď, pokud je rozhraní dostupné; jinak to výslovně oznámí. Odstraní služby, DKMS, HWDB, udev pravidla a desktop položku. Profil, podsvícení a další firmware volby zůstávají nastavené.",
+            en: "Uninstall requests and verifies Auto when the fan interface is available; otherwise it reports that separately. It removes services, DKMS, HWDB, udev integration and the desktop entry. Profile, lighting and other firmware choices remain configured.",
         },
         MessageId::DocsUsagePane009 => CatalogEntry {
             cs: "DKMS používá distribuční podepisování. Pokud modul hlásí Key was rejected by service, importujte cestu klíče vypsanou DKMS a dokončete MOK enrollment po restartu.",
@@ -1529,16 +1529,16 @@ const fn entry(id: MessageId) -> CatalogEntry {
             en: "Community confirmed",
         },
         MessageId::DocsHardwarePane010 => CatalogEntry {
-            cs: "Zelená znamená funkci poskytovanou Linuxem. Žlutá je známý Acer protokol/controller, ale control se stejně ukáže až po správné živé odpovědi. PHN16-72 je plně referenčně otestovaný.",
-            en: "Green means Linux already provides the feature. Yellow marks a known Acer protocol/controller, but the control still appears only after a valid live response. PHN16-72 is the fully reference-tested platform.",
+            cs: "Zelená znamená funkci poskytovanou Linuxem, žlutá známý Acer protokol. Komunitní značka platí jen pro hlášenou funkci a sestavení. PHN16S-71 vyžaduje doložené nastavení predator_v4=1; PH18-73 má potvrzené Auto/Maximum bez RPM a AN16-51 pouze jednu logickou zónu globální barvy. Nové opravy potřebují ověření na těchto strojích; PHN16-72 zůstává referenční platformou.",
+            en: "Green means Linux provides the feature; yellow marks a known Acer protocol. Community marks apply only to the reported capability and build. PHN16S-71 needs the documented predator_v4=1 configuration; PH18-73 has confirmed Auto/Maximum without RPM, and AN16-51 exposes one logical global-color zone. New fixes need testing on those machines; PHN16-72 remains the reference platform.",
         },
         MessageId::DocsHardwarePane011 => CatalogEntry {
             cs: "Pořadí backendů",
             en: "Backend order",
         },
         MessageId::DocsHardwarePane012 => CatalogEntry {
-            cs: "Kernelové volby profilů pocházejí z živého rozhraní choices. Gaming-WMI fallback nabízí omezenou sadu známých příkazů ovladače, ne seznam vyčtený z firmwaru; probe zdroj označí jako kernel-live nebo known-gaming-wmi-commands.",
-            en: "Kernel profile choices come from the live choices interface. The Gaming-WMI fallback exposes the driver's bounded known-command set, not a firmware-enumerated list; the probe labels the source as kernel-live or known-gaming-wmi-commands.",
+            cs: "Kernelové volby profilů pocházejí z živého rozhraní choices. Gaming-WMI fallback nabízí omezenou sadu známých příkazů ovladače, ne seznam vyčtený z firmwaru; probe zdroj označí jako kernel-platform-profile nebo known-gaming-wmi-commands.",
+            en: "Kernel profile choices come from the live choices interface. The Gaming-WMI fallback exposes the driver's bounded known-command set, not a firmware-enumerated list; the probe labels the source as kernel-platform-profile or known-gaming-wmi-commands.",
         },
         MessageId::DocsHardwarePane013 => CatalogEntry {
             cs: "Názvy modelů nejsou allow-list. Jsou to stroje se známou kernelovou podporou nebo užiteční kandidáti k otestování; rozhoduje živé rozhraní konkrétního notebooku.",
@@ -1929,8 +1929,8 @@ const fn entry(id: MessageId) -> CatalogEntry {
             en: "Arch Linux / AUR",
         },
         MessageId::DocsArchAurBody => CatalogEntry {
-            cs: "Stabilní zdrojový balíček AUR sestaví ASense a DKMS pomocí systémového toolchainu Rust. Po makepkg -si výslovně vyberte účet plochy oprávněný používat soukromý socket příkazem sudo asense-configure-user \"$USER\".",
-            en: "The stable AUR source package builds ASense and DKMS with the system Rust toolchain. After makepkg -si, explicitly select the desktop account allowed to use the private socket with sudo asense-configure-user \"$USER\".",
+            cs: "Nejprve na stránce AUR ověřte, že byl balíček zveřejněn; první publikace zatím není dokončena. Zdrojový balíček sestaví ASense a DKMS pomocí systémového toolchainu Rust. Po makepkg -si výslovně vyberte účet plochy oprávněný používat soukromý socket příkazem sudo asense-configure-user \"$USER\".",
+            en: "First check that the AUR package page is available; first publication is still pending. The source package builds ASense and DKMS with the system Rust toolchain. After makepkg -si, explicitly select the desktop account allowed to use the private socket with sudo asense-configure-user \"$USER\".",
         },
         MessageId::DocsArchAurLink => CatalogEntry {
             cs: "Otevřít balíček AUR",
@@ -2153,13 +2153,13 @@ const fn zh_cn(id: MessageId) -> &'static str {
         MessageId::DocsUsagePane004 => "安装",
         MessageId::DocsUsagePane005 => "运行、探测和卸载",
         MessageId::DocsUsagePane006 => {
-            "运行探测命令前请关闭 ASense 窗口，以便一次性请求能够使用守护进程唯一的控制会话。"
+            "ASense 窗口打开时也可以运行探测。请同时升级图形界面和守护进程。"
         }
         MessageId::DocsUsagePane007 => {
-            "探测命令会生成权威的 schema-3 JSON，其中包含型号、电源、性能模式、风扇以及已知 WMI/HID 传输的证据。在 HELLO 2 之后，它只向守护进程发送固定的只读 DIAG PASSIVE 请求；不会调用通用功能发现，不会发送 ENEK 选择器或设置命令，也不会上传任何内容。它会排除序列号、UUID、主机名、用户、网络、启动与存储标识、HID 物理路径、日志、原始 ACPI 表、绝对路径和进程环境。--summary 只是一次新采集结果的可读摘要；共享前请自行检查 JSON。"
+            "探测命令会生成权威的 schema-4 JSON，其中包含型号、电源、性能模式、风扇以及已知 WMI/HID 传输的证据。在 HELLO 2 之后，它只向守护进程发送固定的只读 DIAG PASSIVE 请求；不会调用通用功能发现，不会发送 ENEK 选择器或设置命令，也不会上传任何内容。它会排除序列号、UUID、主机名、用户、网络、启动与存储标识、HID 物理路径、日志、原始 ACPI 表、绝对路径和进程环境。--summary 只是一次新采集结果的可读摘要；共享前请自行检查 JSON。"
         }
         MessageId::DocsUsagePane008 => {
-            "卸载会将活动的风扇控制会话恢复为 Auto，并删除服务、DKMS、HWDB、udev 集成和桌面条目。性能模式、灯光和其他固件选项会保留当前设置。"
+            "卸载时会请求 Auto 并验证回读；如果风扇接口不可用，会单独报告。随后删除服务、DKMS、HWDB、udev 集成和桌面条目。性能模式、灯光和其他固件选项会保留当前设置。"
         }
         MessageId::DocsUsagePane009 => {
             "DKMS 使用发行版的签名机制。如果加载模块时报告 Key was rejected by service，请导入 DKMS 输出的密钥路径，并在重启后完成 MOK 注册。"
@@ -2195,11 +2195,11 @@ const fn zh_cn(id: MessageId) -> &'static str {
         MessageId::DocsHardwarePane008 => "实时探测",
         MessageId::DocsHardwarePane009 => "社区确认",
         MessageId::DocsHardwarePane010 => {
-            "绿色表示该功能已由 Linux 提供。黄色表示已知的 Acer 协议或控制器，但只有在收到有效的实时响应后才会显示控制项。PHN16-72 是经过完整参考测试的平台。"
+            "绿色表示 Linux 提供该功能，黄色表示已知的 Acer 协议。社区标记仅适用于已报告的功能和构建版本。PHN16S-71 需要文档中说明的 predator_v4=1 配置；PH18-73 已确认可使用 Auto/Maximum，但没有 RPM；AN16-51 只提供一个全局颜色逻辑区域。新修复仍需在这些设备上测试；PHN16-72 仍是参考平台。"
         }
         MessageId::DocsHardwarePane011 => "后端优先级",
         MessageId::DocsHardwarePane012 => {
-            "内核性能模式选项来自实时 choices 接口。Gaming-WMI 回退只公开驱动程序中有限的已知命令集，而不是固件枚举的列表；探测结果会将来源标记为 kernel-live 或 known-gaming-wmi-commands。"
+            "内核性能模式选项来自实时 choices 接口。Gaming-WMI 回退只公开驱动程序中有限的已知命令集，而不是固件枚举的列表；探测结果会将来源标记为 kernel-platform-profile 或 known-gaming-wmi-commands。"
         }
         MessageId::DocsHardwarePane013 => {
             "型号名称不是允许列表。这些型号具备已知的内核支持，或适合作为测试候选；是否可用由具体笔记本电脑上的实时接口决定。"
@@ -2319,7 +2319,7 @@ const fn zh_cn(id: MessageId) -> &'static str {
         MessageId::DocsStandaloneReleaseLink => "打开发布页面",
         MessageId::DocsArchAur => "Arch Linux / AUR",
         MessageId::DocsArchAurBody => {
-            "稳定版 AUR 源码包使用系统提供的 Rust 工具链构建 ASense 和 DKMS。运行 makepkg -si 后，请执行 sudo asense-configure-user \"$USER\"，明确选择可访问私有套接字的桌面账户。"
+            "请先检查 AUR 软件包页面是否可用；首次发布尚未完成。源码包使用系统提供的 Rust 工具链构建 ASense 和 DKMS。运行 makepkg -si 后，请执行 sudo asense-configure-user \"$USER\"，明确选择可访问私有套接字的桌面账户。"
         }
         MessageId::DocsArchAurLink => "打开 AUR 软件包页面",
     }
@@ -2524,11 +2524,11 @@ mod tests {
     }
 
     #[test]
-    fn frozen_english_czech_catalog_matches_r5_1_with_two_reviewed_corrections() {
-        // The first 240 IDs are the exact R5.1 direct-catalog authority. The
-        // digest includes each stable variant name plus both legacy-language
-        // values. Its only reviewed copy changes are the now-generic language
-        // switch label and the explicit three-language About sentence.
+    fn english_czech_core_catalog_matches_reviewed_copy() {
+        // The first 240 stable IDs retain the legacy catalog ordering. The
+        // reviewed 0.4 copy updates passive probe/schema instructions,
+        // uninstall outcomes and the capability matrix; the digest includes
+        // variant names and both language values.
         assert_eq!(MessageId::DocsProjectPane013 as usize, 239);
         let mut digest = Sha256::new();
         for id in MessageId::ALL.into_iter().take(240) {
@@ -2549,9 +2549,9 @@ mod tests {
         assert_eq!(
             digest.finalize().as_slice(),
             &[
-                0x70, 0x9e, 0x30, 0x0d, 0x72, 0x32, 0x4d, 0x6b, 0x08, 0xfb, 0xc6, 0x57, 0xae, 0xd8,
-                0x98, 0xaa, 0xe4, 0x4e, 0x83, 0xfc, 0x91, 0x18, 0xd6, 0x31, 0x52, 0xe3, 0x45, 0xa2,
-                0xcd, 0x61, 0x88, 0xe3,
+                0xdd, 0xaf, 0x57, 0xe0, 0x7b, 0x91, 0x9f, 0x07, 0xef, 0x8e, 0xd1, 0x2e, 0xbf, 0xd7,
+                0xc9, 0x06, 0xd7, 0xbf, 0x30, 0x8c, 0xbf, 0x31, 0x60, 0x6a, 0xef, 0xeb, 0xef, 0x14,
+                0xd9, 0xdd, 0x0a, 0x7c,
             ]
         );
     }
@@ -2601,9 +2601,9 @@ mod tests {
         assert_eq!(
             digest.finalize().as_slice(),
             &[
-                0xfd, 0x15, 0xe1, 0xaa, 0x53, 0xbf, 0xa9, 0xdb, 0x5b, 0x80, 0x77, 0x22, 0x91, 0xdc,
-                0x6b, 0x5c, 0x89, 0x1d, 0xa7, 0xde, 0xc8, 0xda, 0xe6, 0x1d, 0x8e, 0x8c, 0x8a, 0x7e,
-                0x77, 0xa0, 0x3c, 0x9d,
+                0xcd, 0x64, 0xf2, 0xa3, 0x8d, 0x4d, 0x4c, 0x74, 0x91, 0xe1, 0x66, 0xa9, 0x7c, 0x1f,
+                0x73, 0x69, 0x7a, 0x6a, 0xa8, 0x2c, 0x8d, 0x67, 0x68, 0x56, 0xfb, 0x41, 0x0d, 0x66,
+                0x3e, 0x07, 0x0d, 0x08,
             ]
         );
     }
@@ -2614,7 +2614,7 @@ mod tests {
             (
                 MessageId::DocsUsagePane007,
                 &[
-                    "schema-3",
+                    "schema-4",
                     "JSON",
                     "WMI/HID",
                     "HELLO 2",

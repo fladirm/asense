@@ -1,3 +1,17 @@
+asense (0.4.0-1~local1) resolute; urgency=medium
+
+  * Repair mode-only/ENXIO fan discovery and re-discover hardware before writes.
+  * Serve bounded concurrent control clients while preserving Manual ownership,
+    thermal watchdogs and disconnect recovery.
+  * Add evidence-bounded AN17-51, AN14-41 and AN16-51 lighting variants with
+    canonical write/readback policy and native C regression coverage.
+  * Correct Acer profile labels and passive schema-4 diagnostics, including
+    descriptor-only Darfon USB discovery and legacy schema-3 report reading.
+  * Preserve unknown telemetry/control state and report absent fan recovery
+    separately from verified Auto. Keep source, DKMS and Arch metadata aligned.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Tue, 20 Oct 2026 01:20:00 +0200
+
 asense (0.3.0-1~local1) resolute; urgency=medium
 
   * Ship the bounded passive schema-3 compatibility probe and synchronized

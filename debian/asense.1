@@ -1,4 +1,4 @@
-.TH ASENSE 1 "2 August 2026" "ASense 0.3.0" "User Commands"
+.TH ASENSE 1 "20 October 2026" "ASense 0.4.0" "User Commands"
 .SH NAME
 asense \- Acer laptop control center
 .SH SYNOPSIS
@@ -19,13 +19,13 @@ panel.
 .SH OPTIONS
 .TP
 .B probe, --probe
-Print the authoritative local, read-only schema-3 JSON capability report to
+Print the authoritative local, read-only schema-4 JSON capability report to
 standard output.  Redirect it with
 .BR "asense probe > asense-probe.json" .
 The probe performs no upload or default mutation.
 .TP
 .B probe --summary, --probe --summary
-Print a bounded human-readable view of a fresh schema-3 capture.  This is for
+Print a bounded human-readable view of a fresh schema-4 capture.  This is for
 quick inspection and does not replace the JSON attachment in a support report.
 .TP
 .B --toggle

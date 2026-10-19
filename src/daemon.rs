@@ -6,7 +6,9 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::control::{
@@ -41,6 +43,8 @@ const NVIDIA_RECONCILE_RETRY: Duration = Duration::from_secs(30);
 const NVIDIA_RECONCILE_POLL: Duration = Duration::from_secs(1);
 const MAX_LIGHTING_CACHE_BYTES: u64 = 2048;
 const MAX_CACHED_LIGHTING_TARGETS: usize = 4;
+const MAX_CONTROL_CLIENTS: usize = 8;
+const CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -133,9 +137,15 @@ impl CommandDecoder {
 pub fn run() -> Result<(), String> {
     ensure_root()?;
     let listener = activated_listener()?;
-    let mut maintenance = RuntimeMaintenance::new();
+    let runtime = Arc::new(Mutex::new(DaemonRuntime::new()));
+    let active_clients = Arc::new(AtomicUsize::new(0));
+    let mut client_id = 0_u64;
     loop {
-        maintenance.poll_with_discovery();
+        runtime
+            .lock()
+            .map_err(|_| "daemon runtime lock is poisoned")?
+            .maintenance
+            .poll_with_discovery();
         let mut ready = libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,
@@ -157,14 +167,121 @@ pub fn run() -> Result<(), String> {
         let (stream, _) = listener
             .accept()
             .map_err(|error| format!("accept failed: {error}"))?;
-        if let Err(error) = serve_client(stream, &mut maintenance) {
-            eprintln!("asense daemon client error: {error}");
+        if let Err(error) = authorize_peer(&stream) {
+            eprintln!("asense daemon rejected client: {error}");
+            continue;
+        }
+        client_id = client_id
+            .checked_add(1)
+            .ok_or("control client identity exhausted")?;
+        if let Err(error) = spawn_control_client(
+            stream,
+            client_id,
+            Arc::clone(&runtime),
+            Arc::clone(&active_clients),
+            Path::new("/"),
+        ) {
+            eprintln!("asense daemon could not admit client: {error}");
         }
     }
 }
 
+/// All firmware transactions are serialized, while socket reads/writes occur
+/// outside this lock. Only one client may lease Manual fan control.
+struct DaemonRuntime {
+    maintenance: RuntimeMaintenance,
+    fan_owner: Option<u64>,
+}
+
+impl DaemonRuntime {
+    fn new() -> Self {
+        Self {
+            maintenance: RuntimeMaintenance::new(),
+            fan_owner: None,
+        }
+    }
+
+    fn claim_fan_command(&mut self, client: u64, fields: &[&str]) -> Result<(), String> {
+        let changes_fans = matches!(
+            fields,
+            ["FAN", "AUTO"] | ["FAN", "MAXIMUM"] | ["FAN", "MANUAL", _, _] | ["PROFILE", _]
+        );
+        if !changes_fans {
+            return Ok(());
+        }
+        let safety_override = matches!(fields, ["FAN", "AUTO"] | ["FAN", "MAXIMUM"]);
+        if self.fan_owner.is_some_and(|owner| owner != client) && !safety_override {
+            return Err(
+                "another client owns manual fan control; Auto or Maximum can safely override it"
+                    .to_string(),
+            );
+        }
+        self.fan_owner = Some(client);
+        Ok(())
+    }
+
+    fn release_unleased_fans(&mut self, client: u64, state: FanSessionState) {
+        if self.fan_owner == Some(client) && !state.requires_auto_on_disconnect() {
+            self.fan_owner = None;
+        }
+    }
+}
+
+struct ClientPermit(Arc<AtomicUsize>);
+
+impl ClientPermit {
+    fn acquire(active: Arc<AtomicUsize>) -> Result<Self, String> {
+        active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_CONTROL_CLIENTS).then_some(count + 1)
+            })
+            .map_err(|_| "too many ASense control clients".to_string())?;
+        Ok(Self(active))
+    }
+}
+
+impl Drop for ClientPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// The caller authenticates the peer before admission. The alternate root is
+/// private test injection; production always passes `/`.
+fn spawn_control_client(
+    mut stream: UnixStream,
+    client_id: u64,
+    runtime: Arc<Mutex<DaemonRuntime>>,
+    active: Arc<AtomicUsize>,
+    root: &Path,
+) -> Result<JoinHandle<()>, String> {
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| error.to_string())?;
+    let permit = match ClientPermit::acquire(active) {
+        Ok(permit) => permit,
+        Err(error) => {
+            write_response(&mut stream, Err(error.clone()))?;
+            return Err(error);
+        }
+    };
+    let root = root.to_path_buf();
+    thread::Builder::new()
+        .name(format!("asense-client-{client_id}"))
+        .spawn(move || {
+            let _permit = permit;
+            let result = AcerHardware::discover_at(root)
+                .map_err(|error| error.to_string())
+                .and_then(|hardware| serve_client(stream, client_id, runtime, hardware));
+            if let Err(error) = result {
+                eprintln!("asense daemon client error: {error}");
+            }
+        })
+        .map_err(|error| format!("cannot start control worker: {error}"))
+}
+
 /// Runtime maintenance is lazy so a socket activation caused solely by the
-/// schema-3 passive probe cannot restore ENEK state or reconcile NVIDIA. The
+/// passive probe cannot restore ENEK state or reconcile NVIDIA. The
 /// first ordinary GUI/control command activates the historical behavior once;
 /// subsequent global and per-client polling remains unchanged.
 struct RuntimeMaintenance {
@@ -226,17 +343,27 @@ impl RuntimeMaintenance {
     }
 }
 
-pub fn failsafe_auto() -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailsafeFanReset {
+    Verified,
+    NotExposed,
+}
+
+pub fn failsafe_auto() -> Result<FailsafeFanReset, String> {
     ensure_root()?;
     let _guard = MutationGuard::acquire()?;
     let hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
-    if hardware.capabilities().fans.backend.is_some() {
+    reset_automatic_fans(&hardware)
+}
+
+fn reset_automatic_fans(hardware: &AcerHardware) -> Result<FailsafeFanReset, String> {
+    if hardware.capabilities().fans.backend.is_some() || hardware.fan_control_exposed() {
         hardware
             .apply_fan_setting(FanSetting::Automatic)
-            .map(|_| ())
+            .map(|_| FailsafeFanReset::Verified)
             .map_err(|error| error.to_string())
     } else {
-        Ok(())
+        Ok(FailsafeFanReset::NotExposed)
     }
 }
 
@@ -461,27 +588,47 @@ fn save_cached_lighting_at(path: &Path, request: &LightingRequest) -> Result<(),
 }
 
 fn activated_listener() -> Result<UnixListener, String> {
-    let pid_ok = env::var("LISTEN_PID")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        == Some(std::process::id());
-    let fd_count = env::var("LISTEN_FDS")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    if !pid_ok || fd_count != 1 {
-        return Err("daemon requires exactly one systemd-activated socket".to_string());
-    }
+    let pid = env::var("LISTEN_PID")
+        .map_err(|error| format!("missing socket activation PID: {error}"))?;
+    let descriptors = env::var("LISTEN_FDS")
+        .map_err(|error| format!("missing socket activation descriptor count: {error}"))?;
+    validate_socket_activation(&pid, &descriptors, std::process::id())?;
     // SAFETY: systemd guarantees fd 3 is the single listening socket described by LISTEN_FDS.
-    Ok(unsafe { UnixListener::from_raw_fd(3) })
+    let listener = unsafe { UnixListener::from_raw_fd(3) };
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("invalid activated Unix socket: {error}"))?;
+    if address.as_pathname() != Some(Path::new(CONTROL_SOCKET)) {
+        return Err("activated listener does not match the protected ASense socket".to_string());
+    }
+    Ok(listener)
+}
+
+fn validate_socket_activation(
+    pid: &str,
+    descriptors: &str,
+    current_pid: u32,
+) -> Result<(), String> {
+    let pid = pid
+        .parse::<u32>()
+        .map_err(|error| format!("invalid socket activation PID: {error}"))?;
+    let descriptors = descriptors
+        .parse::<u32>()
+        .map_err(|error| format!("invalid socket activation descriptor count: {error}"))?;
+    if pid != current_pid || descriptors != 1 {
+        return Err(
+            "daemon requires exactly one systemd-activated socket for its own PID".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn serve_client(
     mut stream: UnixStream,
-    maintenance: &mut RuntimeMaintenance,
+    client_id: u64,
+    runtime: Arc<Mutex<DaemonRuntime>>,
+    mut hardware: AcerHardware,
 ) -> Result<(), String> {
-    authorize_peer(&stream)?;
-    let mut hardware = AcerHardware::discover().map_err(|error| error.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
         .map_err(|error| format!("set watchdog timeout: {error}"))?;
@@ -491,13 +638,28 @@ fn serve_client(
     let mut protocol = ProtocolSession::new();
     let mut fan_session = FanSessionState::Automatic;
     let mut session_maintenance_active = false;
+    let connected_at = Instant::now();
 
     let result = (|| -> Result<(), String> {
         loop {
-            if session_maintenance_active {
-                maintenance.poll_with(&hardware);
+            {
+                let mut shared = runtime
+                    .lock()
+                    .map_err(|_| "daemon runtime lock is poisoned")?;
+                if session_maintenance_active {
+                    shared.maintenance.poll_with(&hardware);
+                }
+                if shared.fan_owner == Some(client_id) {
+                    enforce_thermal_watchdog(&mut hardware, &mut fan_session)?;
+                } else if fan_session.requires_auto_on_disconnect() {
+                    // A safety Auto/Maximum from another authorized client
+                    // revoked this lease. Its disconnect must not undo that.
+                    fan_session.automatic_readback_confirmed();
+                }
             }
-            enforce_thermal_watchdog(&mut hardware, &mut fan_session)?;
+            if !protocol.negotiated && connected_at.elapsed() >= CLIENT_HANDSHAKE_TIMEOUT {
+                break Err("control protocol handshake timed out".to_string());
+            }
             let command = match decoder.read(&mut reader) {
                 Ok(Some(command)) => command,
                 Ok(None) => break Ok(()),
@@ -532,24 +694,44 @@ fn serve_client(
                 ProtocolAction::Dispatch => {}
             }
             let fields = command.split_ascii_whitespace().collect::<Vec<_>>();
-            if command_activates_runtime_maintenance(&fields) {
-                session_maintenance_active = true;
-                maintenance.activate();
-                maintenance.poll_with(&hardware);
-            }
-            let command_result = execute_command(&mut hardware, command, &mut fan_session);
+            let command_result = {
+                let mut shared = runtime
+                    .lock()
+                    .map_err(|_| "daemon runtime lock is poisoned")?;
+                shared.claim_fan_command(client_id, &fields).and_then(|()| {
+                    if command_activates_runtime_maintenance(&fields) {
+                        session_maintenance_active = true;
+                        shared.maintenance.activate();
+                        shared.maintenance.poll_with(&hardware);
+                    }
+                    execute_command(&mut hardware, command, &mut fan_session)
+                })
+            };
             let command_succeeded = command_result.is_ok();
             write_response(&mut stream, command_result)?;
-            if command_succeeded {
-                fan_session.response_delivered();
+            {
+                let mut shared = runtime
+                    .lock()
+                    .map_err(|_| "daemon runtime lock is poisoned")?;
+                if shared.fan_owner == Some(client_id) {
+                    if command_succeeded {
+                        fan_session.response_delivered();
+                    }
+                    shared.release_unleased_fans(client_id, fan_session);
+                }
             }
         }
     })();
 
-    let cleanup = if fan_session.requires_auto_on_disconnect() {
+    let mut shared = runtime
+        .lock()
+        .map_err(|_| "daemon runtime lock is poisoned")?;
+    let owns_fans = shared.fan_owner == Some(client_id);
+    let cleanup = if owns_fans && fan_session.requires_auto_on_disconnect() {
         match MutationGuard::acquire() {
             Ok(_mutation_guard) => hardware
-                .apply_fan_setting(FanSetting::Automatic)
+                .refreshed()
+                .and_then(|hardware| hardware.apply_fan_setting(FanSetting::Automatic))
                 .map(|_| ())
                 .map_err(|error| format!("failsafe Auto failed after disconnect: {error}")),
             Err(error) => Err(format!(
@@ -559,6 +741,9 @@ fn serve_client(
     } else {
         Ok(())
     };
+    if owns_fans {
+        shared.fan_owner = None;
+    }
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -689,10 +874,15 @@ fn execute_command(
     let _mutation_guard = command_is_mutation(&fields)
         .then(MutationGuard::acquire)
         .transpose()?;
+    if matches!(fields.as_slice(), ["FAN", ..] | ["PROFILE", ..]) {
+        // hwmon indices and readable firmware state can change after resume
+        // or a driver reload. Never mutate through a session-old snapshot.
+        *hardware = hardware.refreshed().map_err(|error| error.to_string())?;
+    }
     match fields.as_slice() {
         ["PING"] => Ok("ready".to_string()),
         ["DIAG", "PASSIVE"] => {
-            let diagnostics = PassiveDiagnostics::collect();
+            let diagnostics = PassiveDiagnostics::collect_at(hardware.root());
             encode_passive_diagnostics(&diagnostics)
         }
         ["CAPS"] => {
@@ -1326,6 +1516,210 @@ mod tests {
         assert!(parse_color("fff").is_err());
         assert!(parse_color("000000junk").is_err());
         assert!(parse_color("zzzzzz").is_err());
+    }
+
+    #[test]
+    fn failsafe_distinguishes_absent_control_from_verified_automatic_mode() {
+        let fixture = ControlFixture::new();
+        let hardware = crate::hardware::AcerHardware::discover_at(&fixture.0).unwrap();
+        assert_eq!(
+            super::reset_automatic_fans(&hardware).unwrap(),
+            super::FailsafeFanReset::NotExposed
+        );
+        let hwmon = fixture.0.join("sys/class/hwmon/hwmon9");
+        std::fs::create_dir_all(&hwmon).unwrap();
+        for (name, value) in [
+            ("name", "acer\n"),
+            ("pwm1_enable", "0\n"),
+            ("pwm2_enable", "0\n"),
+        ] {
+            std::fs::write(hwmon.join(name), value).unwrap();
+        }
+        let hardware = hardware.refreshed().unwrap();
+        assert_eq!(
+            super::reset_automatic_fans(&hardware).unwrap(),
+            super::FailsafeFanReset::Verified
+        );
+        for name in ["pwm1_enable", "pwm2_enable"] {
+            assert_eq!(
+                std::fs::read_to_string(hwmon.join(name)).unwrap().trim(),
+                "2"
+            );
+        }
+        std::fs::write(hwmon.join("pwm1_enable"), "invalid\n").unwrap();
+        let hardware = hardware.refreshed().unwrap();
+        assert!(
+            super::reset_automatic_fans(&hardware).is_err(),
+            "an exposed but invalid control is a recovery failure, not an absent optional backend"
+        );
+    }
+
+    #[test]
+    fn control_client_capacity_is_bounded_and_released() {
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut permits = Vec::new();
+        for _ in 0..super::MAX_CONTROL_CLIENTS {
+            permits.push(super::ClientPermit::acquire(active.clone()).unwrap());
+        }
+        assert!(super::ClientPermit::acquire(active.clone()).is_err());
+        permits.pop();
+        let replacement = super::ClientPermit::acquire(active.clone()).unwrap();
+        assert_eq!(
+            active.load(std::sync::atomic::Ordering::Acquire),
+            super::MAX_CONTROL_CLIENTS
+        );
+        drop(replacement);
+        drop(permits);
+        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn fan_lease_prevents_interference_but_permits_safety_override() {
+        let mut runtime = super::DaemonRuntime::new();
+        runtime
+            .claim_fan_command(1, &["FAN", "MANUAL", "50", "50"])
+            .unwrap();
+        assert!(
+            runtime
+                .claim_fan_command(2, &["FAN", "MANUAL", "70", "70"])
+                .is_err()
+        );
+        assert!(
+            runtime
+                .claim_fan_command(2, &["PROFILE", "balanced"])
+                .is_err()
+        );
+        runtime.claim_fan_command(2, &["DIAG", "PASSIVE"]).unwrap();
+        assert_eq!(runtime.fan_owner, Some(1));
+        runtime.claim_fan_command(2, &["FAN", "MAXIMUM"]).unwrap();
+        runtime.release_unleased_fans(1, FanSessionState::Automatic);
+        assert_eq!(runtime.fan_owner, Some(2));
+        runtime.release_unleased_fans(2, FanSessionState::PersistentMaximum);
+        assert_eq!(runtime.fan_owner, None);
+    }
+
+    struct ControlFixture(std::path::PathBuf);
+
+    impl ControlFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "asense-client-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let dmi = root.join("sys/class/dmi/id");
+            std::fs::create_dir_all(&dmi).unwrap();
+            std::fs::write(dmi.join("sys_vendor"), "Acer\n").unwrap();
+            std::fs::write(dmi.join("product_name"), "Predator PHN16S-71\n").unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for ControlFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove owned control fixture");
+        }
+    }
+
+    #[test]
+    fn idle_gui_connection_does_not_block_a_second_passive_client() {
+        use std::io::Write as _;
+        use std::sync::{Arc, Mutex};
+        let fixture = ControlFixture::new();
+        let runtime = Arc::new(Mutex::new(super::DaemonRuntime::new()));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (first, first_server) = UnixStream::pair().unwrap();
+        first
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let first_worker = super::spawn_control_client(
+            first_server,
+            1,
+            runtime.clone(),
+            active.clone(),
+            &fixture.0,
+        )
+        .unwrap();
+        let mut first = BufReader::new(first);
+        first.get_mut().write_all(b"HELLO 2\n").unwrap();
+        let mut response = String::new();
+        first.read_line(&mut response).unwrap();
+        assert!(response.starts_with("OK protocol=2"));
+
+        // Leave the first control stream open and idle, as the real GUI does.
+        let (second, second_server) = UnixStream::pair().unwrap();
+        second
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let second_worker = super::spawn_control_client(
+            second_server,
+            2,
+            runtime.clone(),
+            active.clone(),
+            &fixture.0,
+        )
+        .unwrap();
+        let mut second = BufReader::new(second);
+        second
+            .get_mut()
+            .write_all(b"HELLO 2\nDIAG PASSIVE\n")
+            .unwrap();
+        response.clear();
+        second.read_line(&mut response).unwrap();
+        assert!(response.starts_with("OK protocol=2"));
+        response.clear();
+        second.read_line(&mut response).unwrap();
+        let diagnostics: serde_json::Value = serde_json::from_str(
+            response
+                .strip_prefix("OK ")
+                .expect("passive response while GUI is open"),
+        )
+        .unwrap();
+        assert!(diagnostics.get("fans").is_some());
+        assert!(!runtime.lock().unwrap().maintenance.active);
+        assert_eq!(
+            std::fs::read_to_string(fixture.0.join("sys/class/dmi/id/product_name")).unwrap(),
+            "Predator PHN16S-71\n"
+        );
+        drop(second);
+        drop(first);
+        first_worker.join().unwrap();
+        second_worker.join().unwrap();
+        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_client_that_never_negotiates_cannot_keep_a_slot_forever() {
+        let fixture = ControlFixture::new();
+        let runtime = std::sync::Arc::new(std::sync::Mutex::new(super::DaemonRuntime::new()));
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(7)))
+            .unwrap();
+        let worker =
+            super::spawn_control_client(server, 1, runtime, active.clone(), &fixture.0).unwrap();
+        let mut client = BufReader::new(client);
+        let mut response = String::new();
+        assert_eq!(client.read_line(&mut response).unwrap(), 0);
+        worker.join().unwrap();
+        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn socket_activation_requires_exact_pid_and_one_descriptor() {
+        assert!(super::validate_socket_activation("42", "1", 42).is_ok());
+        for (pid, count) in [
+            ("", "1"),
+            ("42", ""),
+            ("wrong", "1"),
+            ("43", "1"),
+            ("42", "0"),
+            ("42", "2"),
+            ("42", "-1"),
+        ] {
+            assert!(super::validate_socket_activation(pid, count, 42).is_err());
+        }
     }
 
     #[test]

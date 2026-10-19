@@ -115,21 +115,7 @@
 #define ASENSE_BATTERY_LIMIT BIT(0)
 #define ASENSE_BATTERY_CALIBRATION BIT(1)
 
-struct asense_effect {
-	u8 mode;
-	u8 speed;
-	u8 brightness;
-	u8 direction;
-	u8 red;
-	u8 green;
-	u8 blue;
-	u8 engine;
-};
-
-struct asense_zones {
-	u8 rgb[4][3];
-	u8 brightness;
-};
+#include "asense_rgb_policy.h"
 
 enum asense_endpoint_type {
 	ASENSE_ENDPOINT_GAMING,
@@ -159,6 +145,7 @@ struct asense_rgb {
 	bool rgb_cache_valid;
 	bool rgb_available;
 	bool zone_preamble;
+	u8 lighting_flags;
 	bool fan_behavior_available;
 	bool fan_speed_available;
 	bool profile_available;
@@ -233,6 +220,24 @@ static const struct asense_zoned_quirk asense_zoned_quirks[] = {
 	{
 		.product = "Predator PHN14-51",
 		.zone_mask = 0x07,
+	},
+	{
+		.product = "Nitro AN17-51",
+		.zone_mask = 0x0f,
+		.flags = ASENSE_ZONE_FLAG_FOUR_ZONE_ENGINE |
+			 ASENSE_ZONE_FLAG_STALE_STATIC |
+			 ASENSE_ZONE_FLAG_STATIC_COLOR_SHADOW,
+	},
+	{
+		.product = "Nitro AN14-41",
+		.zone_mask = 0x0f,
+		.flags = ASENSE_ZONE_FLAG_BOOT_WAVE_ZERO,
+	},
+	{
+		/* Only global static color is confirmed, not per-zone writes. */
+		.product = "Nitro AN16-51",
+		.zone_mask = 0x01,
+		.flags = ASENSE_ZONE_FLAG_GLOBAL_STATIC,
 	},
 };
 
@@ -603,6 +608,7 @@ static void asense_select_zone_config(struct asense_rgb *rgb)
 	/* Unknown devices must satisfy the complete four-zone getter contract. */
 	rgb->zone_mask = ASENSE_ZONE_MASK_MAX;
 	rgb->zone_preamble = false;
+	rgb->lighting_flags = 0;
 	if (!product)
 		return;
 	for (index = 0; index < ARRAY_SIZE(asense_zoned_quirks); index++) {
@@ -611,6 +617,7 @@ static void asense_select_zone_config(struct asense_rgb *rgb)
 		rgb->zone_mask = asense_zoned_quirks[index].zone_mask;
 		rgb->zone_preamble = asense_zoned_quirks[index].flags &
 			ASENSE_ZONE_FLAG_PREAMBLE;
+		rgb->lighting_flags = asense_zoned_quirks[index].flags;
 		return;
 	}
 }
@@ -950,18 +957,15 @@ static int asense_write_effect(struct asense_rgb *rgb,
 	return asense_set_call(rgb, ASENSE_EFFECT_SET, payload, sizeof(payload));
 }
 
-static u8 asense_engine_for_mode(u8 mode)
+static u8 asense_engine_for_mode(struct asense_rgb *rgb, u8 mode)
 {
-	return mode == 0 ? ASENSE_STATIC_ENGINE : ASENSE_FOUR_ZONE_ENGINE;
+	return asense_policy_engine(rgb->lighting_flags, mode);
 }
 
-static struct asense_effect asense_static_effect(u8 brightness)
+static struct asense_effect asense_static_effect(struct asense_rgb *rgb,
+						 const struct asense_zones *zones)
 {
-	return (struct asense_effect) {
-		.mode = 0,
-		.brightness = brightness,
-		.engine = ASENSE_STATIC_ENGINE,
-	};
+	return asense_policy_static_effect(rgb->lighting_flags, zones);
 }
 
 static int asense_read_zone(struct asense_rgb *rgb, unsigned int zone,
@@ -1005,6 +1009,14 @@ static int asense_read_rgb_state(struct asense_rgb *rgb,
 	error = asense_read_effect(rgb, effect);
 	if (error)
 		return error;
+	if ((rgb->lighting_flags & ASENSE_ZONE_FLAG_GLOBAL_STATIC) &&
+	    effect->mode == 0) {
+		zones->rgb[0][0] = effect->red;
+		zones->rgb[0][1] = effect->green;
+		zones->rgb[0][2] = effect->blue;
+		zones->brightness = effect->brightness;
+		return 0;
+	}
 	for (zone = 0; zone < count; zone++) {
 		error = asense_read_zone(rgb, zone, zones->rgb[zone]);
 		if (error)
@@ -1022,23 +1034,37 @@ static int asense_read_zones(struct asense_rgb *rgb,
 	return asense_read_rgb_state(rgb, &effect, zones);
 }
 
-static bool asense_effect_valid(const struct asense_effect *effect)
+static bool asense_effect_valid(struct asense_rgb *rgb,
+				const struct asense_effect *effect)
 {
-	if (effect->mode > 7 || effect->speed > 9 ||
-	    effect->brightness > 100 || effect->direction > 2)
-		return false;
-	if (effect->mode <= 1 && (effect->speed || effect->direction))
-		return false;
-	if (effect->mode == 2 && effect->direction)
-		return false;
-	if ((effect->mode == 3 || effect->mode == 4) &&
-	    (effect->direction < 1 || effect->direction > 2))
-		return false;
-	if (effect->mode >= 5 && effect->direction)
-		return false;
-	if (effect->engine != asense_engine_for_mode(effect->mode))
-		return false;
-	return true;
+	return asense_policy_write_valid(rgb->lighting_flags, effect);
+}
+
+static bool asense_effect_committed(struct asense_rgb *rgb,
+				    const struct asense_effect *expected,
+				    const struct asense_effect *actual,
+				    bool zone_transaction)
+{
+	return asense_policy_effect_matches(rgb->lighting_flags, expected,
+					   actual, zone_transaction);
+}
+
+static int asense_snapshot_rgb_state(struct asense_rgb *rgb,
+				     struct asense_effect *effect,
+				     struct asense_zones *zones)
+{
+	int error = asense_read_rgb_state(rgb, effect, zones);
+
+	if (error)
+		return error;
+	if (!asense_policy_read_valid(rgb->lighting_flags, effect))
+		return -EPROTO;
+	/* Read-only boot encodings and stale parameters are never replayed.
+	 * Preserve the observed colors in a canonical static rollback snapshot.
+	 */
+	if (!asense_effect_valid(rgb, effect))
+		*effect = asense_static_effect(rgb, zones);
+	return 0;
 }
 
 static void asense_cache_rgb_state(struct asense_rgb *rgb,
@@ -1076,7 +1102,7 @@ static ssize_t effect_store(struct device *dev, struct device_attribute *attr,
 {
 	struct asense_rgb *rgb = dev_get_drvdata(dev);
 	struct asense_effect requested, previous, actual;
-	struct asense_zones actual_zones;
+	struct asense_zones previous_zones, actual_zones;
 	unsigned int values[7];
 	bool previous_valid = false;
 	int offset = 0;
@@ -1095,19 +1121,19 @@ static ssize_t effect_store(struct device *dev, struct device_attribute *attr,
 		.mode = values[0], .speed = values[1],
 		.brightness = values[2], .direction = values[3],
 		.red = values[4], .green = values[5], .blue = values[6],
-		.engine = asense_engine_for_mode(values[0]),
+		.engine = asense_engine_for_mode(rgb, values[0]),
 	};
-	if (!asense_effect_valid(&requested))
+	if (!asense_effect_valid(rgb, &requested))
 		return -EINVAL;
 
 	mutex_lock(&rgb->lock);
-	error = asense_read_effect(rgb, &previous);
+	error = asense_snapshot_rgb_state(rgb, &previous, &previous_zones);
 	previous_valid = !error;
 	if (!error)
 		error = asense_write_effect(rgb, &requested);
 	if (!error)
 		error = asense_read_rgb_state(rgb, &actual, &actual_zones);
-	if (!error && memcmp(&requested, &actual, sizeof(requested)) != 0)
+	if (!error && !asense_effect_committed(rgb, &requested, &actual, false))
 		error = -EIO;
 	if (!error)
 		asense_cache_rgb_state(rgb, &actual, &actual_zones);
@@ -1163,12 +1189,22 @@ static ssize_t zones_show(struct device *dev, struct device_attribute *attr,
 static int asense_write_zones(struct asense_rgb *rgb,
 			      const struct asense_zones *zones)
 {
-	struct asense_effect static_mode = asense_static_effect(zones->brightness);
+	struct asense_effect static_mode = asense_static_effect(rgb, zones);
 	struct asense_effect actual;
 	unsigned int count = asense_zone_count(rgb->zone_mask);
 	u64 gaming_sys_info;
 	unsigned int zone;
 	int error;
+
+	if (rgb->lighting_flags & ASENSE_ZONE_FLAG_GLOBAL_STATIC) {
+		error = asense_write_effect(rgb, &static_mode);
+		if (!error)
+			error = asense_read_effect(rgb, &actual);
+		if (!error && !asense_effect_committed(rgb, &static_mode,
+						     &actual, false))
+			error = -EIO;
+		return error;
+	}
 
 	if (!count)
 		return -EINVAL;
@@ -1197,7 +1233,7 @@ static int asense_write_zones(struct asense_rgb *rgb,
 	error = asense_write_effect(rgb, &static_mode);
 	if (!error)
 		error = asense_read_effect(rgb, &actual);
-	if (!error && memcmp(&static_mode, &actual, sizeof(static_mode)) != 0)
+	if (!error && !asense_effect_committed(rgb, &static_mode, &actual, true))
 		error = -EIO;
 	return error;
 }
@@ -1265,19 +1301,20 @@ static ssize_t zones_store(struct device *dev, struct device_attribute *attr,
 	error = asense_parse_zones(rgb, buffer, count, &requested);
 	if (error)
 		return error;
-	expected_effect = asense_static_effect(requested.brightness);
+	expected_effect = asense_static_effect(rgb, &requested);
 
 	mutex_lock(&rgb->lock);
-	error = asense_read_rgb_state(rgb, &previous_effect, &previous);
+	error = asense_snapshot_rgb_state(rgb, &previous_effect, &previous);
 	previous_valid = !error;
 	if (!error)
 		error = asense_write_zones(rgb, &requested);
 	if (!error)
 		error = asense_read_rgb_state(rgb, &actual_effect, &actual);
-	if (!error && memcmp(&requested, &actual, sizeof(requested)) != 0)
+	if (!error && !asense_policy_zones_match(&requested, &actual,
+					       asense_zone_count(rgb->zone_mask)))
 		error = -EIO;
-	if (!error && memcmp(&expected_effect, &actual_effect,
-			     sizeof(expected_effect)) != 0)
+	if (!error && !asense_effect_committed(rgb, &expected_effect,
+					     &actual_effect, true))
 		error = -EIO;
 	if (!error)
 		asense_cache_rgb_state(rgb, &actual_effect, &actual);
@@ -1329,11 +1366,11 @@ static ssize_t power_store(struct device *dev, struct device_attribute *attr,
 		return error;
 
 	mutex_lock(&rgb->lock);
-	error = asense_read_rgb_state(rgb, &previous, &previous_zones);
+	error = asense_snapshot_rgb_state(rgb, &previous, &previous_zones);
 	previous_valid = !error;
 	if (!error) {
 		requested = previous;
-		requested.engine = asense_engine_for_mode(requested.mode);
+		requested.engine = asense_engine_for_mode(rgb, requested.mode);
 		if (enabled) {
 			if (!requested.brightness)
 				requested.brightness = rgb->last_nonzero_brightness;
@@ -1343,18 +1380,21 @@ static ssize_t power_store(struct device *dev, struct device_attribute *attr,
 			requested.brightness = 0;
 		}
 	}
-	if (!error && enabled && requested.mode == 0) {
-		requested = asense_static_effect(requested.brightness);
+	if (!error && requested.mode == 0) {
 		requested_zones = previous_zones;
 		requested_zones.brightness = requested.brightness;
-		static_reenable = true;
-		error = asense_write_zones(rgb, &requested_zones);
+		requested = asense_static_effect(rgb, &requested_zones);
+		if (enabled) {
+			static_reenable = true;
+			error = asense_write_zones(rgb, &requested_zones);
+		}
 	}
 	if (!error && !static_reenable)
 		error = asense_write_effect(rgb, &requested);
 	if (!error)
 		error = asense_read_rgb_state(rgb, &actual, &actual_zones);
-	if (!error && memcmp(&requested, &actual, sizeof(requested)) != 0)
+	if (!error && !asense_effect_committed(rgb, &requested, &actual,
+					     requested.mode == 0))
 		error = -EIO;
 	if (!error &&
 	    (memcmp(previous_zones.rgb, actual_zones.rgb,
@@ -2009,15 +2049,15 @@ static int asense_rgb_resume(struct device *dev)
 	static_mode = rgb->cached_effect.mode == 0;
 	expected_effect = rgb->cached_effect;
 	if (static_mode) {
-		expected_effect = asense_static_effect(rgb->cached_zones.brightness);
+		expected_effect = asense_static_effect(rgb, &rgb->cached_zones);
 		error = asense_write_zones(rgb, &rgb->cached_zones);
 	} else {
 		error = asense_write_effect(rgb, &rgb->cached_effect);
 	}
 	if (!error)
 		error = asense_read_rgb_state(rgb, &actual_effect, &actual_zones);
-	if (!error && memcmp(&expected_effect, &actual_effect,
-			     sizeof(expected_effect)) != 0)
+	if (!error && !asense_effect_committed(rgb, &expected_effect,
+					     &actual_effect, static_mode))
 		error = -EIO;
 	if (!error && static_mode &&
 	    memcmp(&rgb->cached_zones, &actual_zones,
@@ -2281,12 +2321,14 @@ static int asense_probe_gaming(struct asense_rgb *rgb)
 	asense_select_zone_config(rgb);
 	error = asense_read_rgb_state(rgb, &effect, &zones);
 	if (!error) {
-		if (!asense_effect_valid(&effect)) {
+		if (!asense_policy_read_valid(rgb->lighting_flags, &effect)) {
 			dev_warn(&rgb->wdev->dev,
 				 "keyboard RGB state is invalid\n");
 		} else {
 			rgb->rgb_available = true;
-			asense_cache_rgb_state(rgb, &effect, &zones);
+			/* Do not replay a noncanonical firmware boot record. */
+			if (asense_effect_valid(rgb, &effect))
+				asense_cache_rgb_state(rgb, &effect, &zones);
 			rgb->last_nonzero_brightness = effect.brightness ?
 				effect.brightness : 100;
 		}
@@ -2446,4 +2488,4 @@ module_wmi_driver(asense_rgb_driver);
 MODULE_AUTHOR("ASense contributors");
 MODULE_DESCRIPTION("Bounded Acer Gaming, Battery and APGE WMI transport");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.3.0");
+MODULE_VERSION("0.4.0");

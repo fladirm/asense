@@ -110,9 +110,14 @@ if [[ -x /usr/libexec/asense/asensed ]]; then
   if asense_root /usr/libexec/asense/asensed --failsafe-auto; then
     FAN_RESET_STATUS="verified"
   else
-    FAN_RESET_STATUS="failed"
-    UNINSTALL_STATUS=1
-    asense_warn "failsafe fan reset failed; firmware should recover Auto on reboot"
+    fan_reset_exit=$?
+    if [[ "$fan_reset_exit" == "3" ]]; then
+      FAN_RESET_STATUS="not-exposed"
+    else
+      FAN_RESET_STATUS="failed"
+      UNINSTALL_STATUS=1
+      asense_warn "failsafe fan reset failed; firmware should recover Auto on reboot"
+    fi
   fi
 fi
 if [[ -d /sys/module/asense_rgb ]]; then
@@ -193,6 +198,10 @@ case "$FAN_RESET_STATUS" in
     ;;
   failed)
     printf 'ASense %s removed; firmware Auto fan control could not be confirmed (reboot recommended).\n' \
+      "$DKMS_VERSION"
+    ;;
+  not-exposed)
+    printf 'ASense %s removed; no fan-control interface was exposed, so firmware Auto state was not verified.\n' \
       "$DKMS_VERSION"
     ;;
   *)

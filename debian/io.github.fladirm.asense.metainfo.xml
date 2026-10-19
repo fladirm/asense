@@ -45,6 +45,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.0" date="2026-10-20">
+      <url>https://github.com/fladirm/asense/releases/tag/v0.4.0</url>
+      <description>
+        <p>
+          Repairs fan discovery and concurrent GUI/probe access, adds scoped
+          Nitro lighting compatibility, and records passive schema-4 USB
+          evidence without enabling unverified firmware commands.
+        </p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-08-02">
       <url>https://github.com/fladirm/asense/releases/tag/v0.3.0</url>
       <description>

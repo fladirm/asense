@@ -1,0 +1,415 @@
+{
+  "schema": 3,
+  "provenance": {
+    "report": "asense-probe",
+    "asense_version": "0.3.0",
+    "build_commit": "cef7e2b15d54d2532594877dc903a37cfe0d80d7",
+    "captured_at_utc": "2026-08-03T11:43:46Z",
+    "capture_duration_ms": 5117,
+    "mode": "passive",
+    "daemon": {
+      "status": "error",
+      "source": "control-socket",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    }
+  },
+  "machine": {
+    "dmi": {
+      "vendor": {
+        "status": "value",
+        "source": "dmi-vendor",
+        "value": "Acer"
+      },
+      "product": {
+        "status": "value",
+        "source": "dmi-product",
+        "value": "Predator PHN16S-71"
+      },
+      "board": {
+        "status": "value",
+        "source": "dmi-board",
+        "value": "FTYPE_ARX"
+      },
+      "bios": {
+        "status": "value",
+        "source": "dmi-bios",
+        "value": "V1.26"
+      }
+    },
+    "kernel": {
+      "release": {
+        "status": "value",
+        "source": "uname",
+        "value": "7.0.0-28-generic"
+      },
+      "architecture": {
+        "status": "value",
+        "source": "uname",
+        "value": "x86_64"
+      }
+    },
+    "os": {
+      "id": {
+        "status": "value",
+        "source": "os-release",
+        "value": "ubuntu"
+      },
+      "version_id": {
+        "status": "value",
+        "source": "os-release",
+        "value": "26.04"
+      }
+    }
+  },
+  "power": {
+    "ac": [
+      {
+        "ordinal": 0,
+        "kind": "mains",
+        "online": {
+          "status": "value",
+          "source": "power-supply",
+          "value": true
+        }
+      },
+      {
+        "ordinal": 1,
+        "kind": "usb",
+        "online": {
+          "status": "value",
+          "source": "power-supply",
+          "value": false
+        }
+      },
+      {
+        "ordinal": 2,
+        "kind": "usb",
+        "online": {
+          "status": "value",
+          "source": "power-supply",
+          "value": false
+        }
+      }
+    ],
+    "batteries": [
+      {
+        "ordinal": 0,
+        "present": {
+          "status": "value",
+          "source": "power-supply",
+          "value": true
+        },
+        "status": {
+          "status": "value",
+          "source": "power-supply",
+          "value": "not-charging"
+        },
+        "capacity_percent": {
+          "status": "value",
+          "source": "power-supply",
+          "value": 80
+        }
+      }
+    ]
+  },
+  "drivers": {
+    "modules": [
+      {
+        "name": "acer_wmi",
+        "loaded": {
+          "status": "value",
+          "source": "module-sysfs",
+          "value": true
+        },
+        "version": {
+          "status": "absent",
+          "source": "module-sysfs",
+          "reason": "not-exposed"
+        }
+      },
+      {
+        "name": "asense_rgb",
+        "loaded": {
+          "status": "value",
+          "source": "module-sysfs",
+          "value": true
+        },
+        "version": {
+          "status": "value",
+          "source": "module-sysfs",
+          "value": "0.3.0"
+        }
+      }
+    ],
+    "wmi": [
+      {
+        "guid": "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56",
+        "instances": 1,
+        "owner": {
+          "status": "value",
+          "source": "wmi-driver",
+          "value": "asense_rgb"
+        },
+        "groups": [
+          "asense_diagnostics",
+          "asense_rgb",
+          "gaming_fan"
+        ]
+      },
+      {
+        "guid": "79772EC5-04B1-4BFD-843C-61E7F77B6CC9",
+        "instances": 1,
+        "owner": {
+          "status": "value",
+          "source": "wmi-driver",
+          "value": "asense_rgb"
+        },
+        "groups": [
+          "asense_diagnostics",
+          "asense_battery"
+        ]
+      },
+      {
+        "guid": "61EF69EA-865C-4BC3-A502-A0DEBA0CB531",
+        "instances": 1,
+        "owner": {
+          "status": "value",
+          "source": "wmi-driver",
+          "value": "asense_rgb"
+        },
+        "groups": [
+          "asense_diagnostics",
+          "asense_apge"
+        ]
+      }
+    ],
+    "hwmon_owner": {
+      "status": "absent",
+      "source": "hwmon-driver",
+      "reason": "not-exposed"
+    }
+  },
+  "profile": {
+    "transport": {
+      "status": "error",
+      "source": "profile-discovery",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    },
+    "current": {
+      "status": "error",
+      "source": "profile-discovery",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    },
+    "choices": {
+      "status": "error",
+      "source": "profile-discovery",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    },
+    "firmware_supported_bitmap": {
+      "status": "error",
+      "source": "gaming-wmi-supported-profiles",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    },
+    "physical_effect": "unverified"
+  },
+  "fans": {
+    "control": {
+      "status": "error",
+      "source": "fan-discovery",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    },
+    "rpm": [],
+    "pwm": [],
+    "temperatures": []
+  },
+  "platform": {
+    "transport": {
+      "status": "error",
+      "source": "platform-discovery",
+      "error": {
+        "stage": "protocol",
+        "class": "timeout",
+        "errno": null
+      }
+    },
+    "fields": [
+      {
+        "name": "battery-limit",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-battery",
+        "read": {
+          "status": "error",
+          "source": "asense-battery",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      },
+      {
+        "name": "battery-calibration",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-battery",
+        "read": {
+          "status": "error",
+          "source": "asense-battery",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      },
+      {
+        "name": "usb-off-charging",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-apge",
+        "read": {
+          "status": "error",
+          "source": "asense-apge",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      },
+      {
+        "name": "keyboard-timeout",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-apge",
+        "read": {
+          "status": "error",
+          "source": "asense-apge",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      },
+      {
+        "name": "boot-sound",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-rgb",
+        "read": {
+          "status": "error",
+          "source": "asense-rgb",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      },
+      {
+        "name": "lcd-override",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-rgb",
+        "read": {
+          "status": "error",
+          "source": "asense-rgb",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      },
+      {
+        "name": "rear-logo",
+        "expected": false,
+        "exposed": false,
+        "source": "asense-rgb",
+        "read": {
+          "status": "error",
+          "source": "asense-rgb",
+          "error": {
+            "stage": "protocol",
+            "class": "timeout",
+            "errno": null
+          }
+        }
+      }
+    ]
+  },
+  "lighting": [],
+  "hid": [],
+  "privacy": {
+    "automatic_upload": false,
+    "persistent_report_id": false,
+    "default_mutations": [],
+    "extended_mutations": [],
+    "excluded": [
+      "serials",
+      "uuids",
+      "hostname",
+      "user-identity",
+      "network-identity",
+      "boot-id",
+      "storage-identity",
+      "hid-serial-and-physical-path",
+      "journals",
+      "raw-acpi-tables",
+      "absolute-device-paths",
+      "environment"
+    ],
+    "bounded_raw": [
+      {
+        "path": "profile.current.raw",
+        "max_bytes": 48
+      },
+      {
+        "path": "profile.choices.value[].transport_raw",
+        "max_bytes": 1
+      },
+      {
+        "path": "profile.firmware_supported_bitmap.value.raw",
+        "max_bytes": 1
+      },
+      {
+        "path": "platform.fields[].read.error.raw",
+        "max_bytes": 8
+      },
+      {
+        "path": "hid[].a1.value.payload",
+        "max_bytes": 64
+      },
+      {
+        "path": "hid[].extended.a3[].read.value.payload",
+        "max_bytes": 64
+      }
+    ]
+  }
+}

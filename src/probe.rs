@@ -40,7 +40,7 @@ enum DaemonDiagnostics {
 }
 
 /// Generates the production report. The control connection performs only the
-/// protocol handshake; schema 3 deliberately does not call `CAPS` because
+/// protocol handshake; the probe deliberately does not call `CAPS` because
 /// historical ENEK capability discovery can send A2 selectors.
 pub fn generate() -> Result<String, String> {
     let captured_at_utc = captured_at_utc()?;
@@ -49,7 +49,7 @@ pub fn generate() -> Result<String, String> {
     generate_at_with_context(Path::new("/"), captured_at_utc, started, daemon)
 }
 
-/// Generates a bounded human-readable view of the same authoritative schema-3
+/// Generates a bounded human-readable view of the same authoritative schema-4
 /// report as [`generate`]. The summary performs no additional collection and
 /// deliberately omits raw payloads and descriptor hashes.
 pub fn generate_summary() -> Result<String, String> {
@@ -114,14 +114,14 @@ fn encode_report(report: &ProbeReport) -> Result<String, String> {
         .map_err(|error| format!("cannot encode capability report: {error}"))?;
     output.push('\n');
     if output.len() > schema::MAX_REPORT_BYTES {
-        return Err("capability report exceeds the schema-3 byte bound".to_string());
+        return Err("capability report exceeds the probe byte bound".to_string());
     }
     Ok(output)
 }
 
 fn summarize_json(input: &str) -> Result<String, String> {
     let report: ProbeReport = serde_json::from_str(input)
-        .map_err(|error| format!("cannot decode generated schema-3 report: {error}"))?;
+        .map_err(|error| format!("cannot decode probe report: {error}"))?;
     summarize_report(&report)
 }
 
@@ -266,6 +266,7 @@ fn summarize_report(report: &ProbeReport) -> Result<String, String> {
                 let role = match item.role {
                     schema::HidRole::Enek5130Lighting => "enek5130-lighting",
                     schema::HidRole::AcerEcHidPowerCandidate => "acer-ec-hid-power-candidate",
+                    schema::HidRole::DarfonLightingCandidate => "darfon-lighting-candidate",
                 };
                 format!("{role}={}:{}", item.identity.vid, item.identity.pid)
             })
@@ -606,16 +607,21 @@ fn map_hid(hid: crate::passive_hid::DiagnosticHid) -> schema::HidEvidence {
         crate::passive_hid::DiagnosticHidRole::AcerEcHidPowerCandidate => {
             schema::HidRole::AcerEcHidPowerCandidate
         }
+        crate::passive_hid::DiagnosticHidRole::DarfonLightingCandidate => {
+            schema::HidRole::DarfonLightingCandidate
+        }
     };
     let identity = schema::HidIdentity {
         bus: match hid.identity.bus {
             crate::passive_hid::DiagnosticHidBus::I2c => schema::HidBus::I2c,
+            crate::passive_hid::DiagnosticHidBus::Usb => schema::HidBus::Usb,
         },
         vid: format!("{:04x}", hid.identity.vid),
         pid: format!("{:04x}", hid.identity.pid),
         name: match hid.identity.name {
             crate::passive_hid::DiagnosticHidName::Enek5130 => schema::HidName::Enek5130,
             crate::passive_hid::DiagnosticHidName::AcerEcHid => schema::HidName::AcerEcHid,
+            crate::passive_hid::DiagnosticHidName::DarfonUsbHid => schema::HidName::DarfonUsbHid,
         },
         interface: hid.identity.interface,
         usage_page: hid.identity.usage_page.map(|value| format!("{value:04x}")),
@@ -1649,6 +1655,104 @@ mod tests {
     }
 
     #[test]
+    fn schema_four_reports_darfon_without_enek_commands_and_preserves_profile_authority() {
+        let tree = TempTree::new();
+        tree.write("sys/class/dmi/id/sys_vendor", "Acer\n");
+        tree.write("sys/class/dmi/id/product_name", "Predator PH16-72\n");
+        tree.write("sys/firmware/acpi/platform_profile", "performance\n");
+        tree.write(
+            "sys/firmware/acpi/platform_profile_choices",
+            "balanced performance\n",
+        );
+        tree.write(
+            "sys/class/hidraw/hidraw3/device/uevent",
+            "HID_ID=0003:00000D62:0000BA51\n",
+        );
+        tree.write(
+            "sys/class/hidraw/hidraw3/device/report_descriptor",
+            [
+                0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x75, 0x08, 0x85, 0x01, 0x95, 0x08, 0xb1,
+                0x02, 0xc0,
+            ],
+        );
+        let diagnostics = passive::PassiveDiagnostics::collect_at(&tree.0);
+        assert_eq!(diagnostics.schema, 2);
+        diagnostics.validate().unwrap();
+        let mut legacy = diagnostics.clone();
+        legacy.schema = 1;
+        assert!(legacy.validate().is_err());
+        legacy.hid.clear();
+        assert_eq!(
+            passive::parse(&passive::encode(&legacy).unwrap()).unwrap(),
+            legacy
+        );
+
+        let report_from = |diagnostics| {
+            let json = generate_at_with_context(
+                &tree.0,
+                "2026-10-20T00:00:00Z".to_string(),
+                Instant::now(),
+                DaemonContext {
+                    identity: Observation::value(
+                        SourceId::ControlSocket,
+                        DaemonIdentity {
+                            protocol: 2,
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                        },
+                    ),
+                    diagnostics: DaemonDiagnostics::Value(Box::new(diagnostics)),
+                },
+            )
+            .unwrap();
+            let report: ProbeReport = serde_json::from_str(&json).unwrap();
+            report.validate().unwrap();
+            assert!(
+                summarize_json(&json)
+                    .unwrap()
+                    .contains("darfon-lighting-candidate=0d62:ba51")
+            );
+            report
+        };
+        let mut report = report_from(diagnostics);
+        assert_eq!(report.schema, 4);
+        assert!(matches!(
+            report.profile.current,
+            schema::ProfileCurrent::Known {
+                profile: schema::ProfileName::Performance,
+                ..
+            }
+        ));
+        assert!(report.hid[0].a1.is_none());
+        assert!(report.privacy.default_mutations.is_empty());
+        assert!(report.privacy.extended_mutations.is_empty());
+        report.schema = 3;
+        assert!(report.validate().is_err());
+        report.hid.clear();
+        assert!(report.validate().is_err());
+
+        tree.write(
+            "sys/class/platform-profile/platform-profile-0/name",
+            "acer-wmi\n",
+        );
+        tree.write(
+            "sys/class/platform-profile/platform-profile-0/profile",
+            "performance\n",
+        );
+        tree.write(
+            "sys/class/platform-profile/platform-profile-0/choices",
+            "balanced-performance performance\n",
+        );
+        let report = report_from(passive::PassiveDiagnostics::collect_at(&tree.0));
+        assert!(matches!(
+            report.profile.current,
+            schema::ProfileCurrent::Known {
+                profile: schema::ProfileName::Turbo,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn frozen_schema_three_fixtures_reopen_validate_and_round_trip() {
         for (name, input) in [
             (
@@ -1677,6 +1781,60 @@ mod tests {
             let reopened: ProbeReport = serde_json::from_str(&encoded).unwrap();
             assert_eq!(reopened, report, "fixture {name} changed after reopen");
             assert_eq!(serde_json::to_string_pretty(&reopened).unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn community_capsules_validate_round_trip_and_keep_unknown_capabilities() {
+        use sha2::{Digest as _, Sha256};
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/community");
+        let sources: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/community/sources.json")).unwrap();
+        for case in sources.as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            let bytes = fs::read(directory.join(case["file"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&bytes)),
+                case["sha256"].as_str().unwrap(),
+                "original capsule {id}"
+            );
+            let report: ProbeReport = serde_json::from_slice(&bytes).unwrap();
+            report
+                .validate()
+                .unwrap_or_else(|error| panic!("capsule {id}: {error}"));
+            let encoded = encode_report(&report).unwrap();
+            let reopened: ProbeReport = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(report, reopened, "capsule {id}");
+            assert_eq!(
+                summarize_report(&report).unwrap(),
+                summarize_json(&encoded).unwrap()
+            );
+            assert!(report.privacy.default_mutations.is_empty());
+            assert!(!report.privacy.automatic_upload);
+            assert!(!report.privacy.persistent_report_id);
+            if id.contains("gui-timeout") {
+                assert!(
+                    matches!(report.provenance.daemon, Observation::Error { ref error, .. } if error.class == ErrorClass::Timeout)
+                );
+                assert!(matches!(
+                    report.fans.control,
+                    schema::FanControl::Error { .. }
+                ));
+            }
+            if id.starts_with("ph18-73") {
+                assert!(
+                    matches!(report.profile.current, schema::ProfileCurrent::Unknown { ref raw, .. } if raw.value == "02")
+                );
+                assert!(matches!(
+                    report.fans.control,
+                    schema::FanControl::Present {
+                        backend: schema::FanBackend::GamingWmi,
+                        ..
+                    }
+                ));
+                assert!(report.fans.rpm.is_empty());
+                assert!(report.fans.temperatures.is_empty());
+            }
         }
     }
 
@@ -1825,7 +1983,7 @@ mod tests {
         assert_eq!(before, snapshot(&tree.0));
         let report: ProbeReport = serde_json::from_str(&output).unwrap();
         report.validate().unwrap();
-        assert_eq!(report.schema, 3);
+        assert_eq!(report.schema, schema::PROBE_SCHEMA);
         assert_eq!(report.power.ac[0].kind, AcKind::Mains);
         assert_eq!(report.power.batteries[0].ordinal, 0);
         assert_eq!(report.drivers.wmi[0].guid, GAMING_GUID);

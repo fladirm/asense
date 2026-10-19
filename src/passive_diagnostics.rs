@@ -1,4 +1,4 @@
-//! Bounded read-only daemon diagnostics used by probe schema 3.
+//! Bounded read-only daemon diagnostics used by probe schema 4.
 //!
 //! This module deliberately has no mutation, NVIDIA or active lighting-
 //! controller dependency. It reads only fixed sysfs files and exposes no
@@ -8,11 +8,11 @@ use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use crate::hardware::discover_acer_hwmon;
+use crate::hardware::{AcerHardware, FanBackend, HardwareError, discover_acer_hwmon};
 use crate::passive_hid::{self, DiagnosticHid};
 use crate::platform::find_wmi_group;
 
-pub(crate) const PASSIVE_DIAGNOSTICS_SCHEMA: u8 = 1;
+pub(crate) const PASSIVE_DIAGNOSTICS_SCHEMA: u8 = 2;
 pub(crate) const MAX_PASSIVE_DIAGNOSTICS_BYTES: usize = 32_764;
 const MAX_LABEL_BYTES: usize = 64;
 const MAX_PROFILE_CHOICES: usize = 8;
@@ -368,10 +368,6 @@ pub(crate) enum DiagnosticSource {
 }
 
 impl PassiveDiagnostics {
-    pub(crate) fn collect() -> Self {
-        Self::collect_at(Path::new("/"))
-    }
-
     pub(crate) fn collect_at(root: &Path) -> Self {
         Self {
             schema: PASSIVE_DIAGNOSTICS_SCHEMA,
@@ -384,8 +380,16 @@ impl PassiveDiagnostics {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.schema != PASSIVE_DIAGNOSTICS_SCHEMA {
+        if !matches!(self.schema, 1 | PASSIVE_DIAGNOSTICS_SCHEMA) {
             return Err("passive diagnostics schema differs".to_string());
+        }
+        if self.schema == 1
+            && self
+                .hid
+                .iter()
+                .any(|hid| hid.role == passive_hid::DiagnosticHidRole::DarfonLightingCandidate)
+        {
+            return Err("legacy passive schema cannot contain USB lighting candidates".to_string());
         }
         validate_observation(&self.profile.transport, |_| Ok(()))?;
         validate_observation(&self.profile.current, |current| {
@@ -604,6 +608,8 @@ pub(crate) fn parse(value: &str) -> Result<PassiveDiagnostics, String> {
 }
 
 fn collect_profile(root: &Path) -> DiagnosticProfile {
+    let performance_is_turbo =
+        AcerHardware::discover_at(root).is_ok_and(|hardware| hardware.performance_is_turbo());
     if let Some((profile, choices)) = discover_kernel_profile(root) {
         let source = DiagnosticSource::KernelPlatformProfile;
         return DiagnosticProfile {
@@ -611,8 +617,17 @@ fn collect_profile(root: &Path) -> DiagnosticProfile {
                 source,
                 backend: DiagnosticProfileBackend::Kernel,
             }),
-            current: read_profile_current(&profile, source, DiagnosticRawEncoding::AsciiToken),
-            choices: read_profile_choices(&choices, DiagnosticProfileBackend::Kernel),
+            current: read_profile_current(
+                &profile,
+                source,
+                DiagnosticRawEncoding::AsciiToken,
+                performance_is_turbo,
+            ),
+            choices: read_profile_choices(
+                &choices,
+                DiagnosticProfileBackend::Kernel,
+                performance_is_turbo,
+            ),
         };
     }
 
@@ -638,6 +653,7 @@ fn collect_profile(root: &Path) -> DiagnosticProfile {
                     &diagnostics_or_production.join("profile"),
                     source,
                     DiagnosticRawEncoding::AsciiToken,
+                    true,
                 )
             },
             |base| {
@@ -645,12 +661,19 @@ fn collect_profile(root: &Path) -> DiagnosticProfile {
                     &base.join("profile_raw"),
                     source,
                     DiagnosticRawEncoding::U8Hex,
+                    true,
                 )
             },
         ),
         choices: production.map_or_else(
             || DiagnosticObservation::absent(DiagnosticAbsence::NotExposed),
-            |base| read_profile_choices(&base.join("choices"), DiagnosticProfileBackend::GamingWmi),
+            |base| {
+                read_profile_choices(
+                    &base.join("choices"),
+                    DiagnosticProfileBackend::GamingWmi,
+                    true,
+                )
+            },
         ),
     }
 }
@@ -685,6 +708,7 @@ fn read_profile_current(
     path: &Path,
     source: DiagnosticSource,
     encoding: DiagnosticRawEncoding,
+    performance_is_turbo: bool,
 ) -> DiagnosticObservation<DiagnosticProfileCurrent> {
     match read_text(path) {
         DiagnosticObservation::Value { value } => {
@@ -720,7 +744,9 @@ fn read_profile_current(
                 DiagnosticRawEncoding::ScalarHex => unreachable!(),
             };
             let profile = match encoding {
-                DiagnosticRawEncoding::AsciiToken => profile_for_command(&raw.value),
+                DiagnosticRawEncoding::AsciiToken => {
+                    profile_for_command(&raw.value, performance_is_turbo)
+                }
                 DiagnosticRawEncoding::U8Hex => profile_for_gaming_raw(&raw.value),
                 DiagnosticRawEncoding::ScalarHex => None,
             };
@@ -738,12 +764,13 @@ fn read_profile_current(
 fn read_profile_choices(
     path: &Path,
     backend: DiagnosticProfileBackend,
+    performance_is_turbo: bool,
 ) -> DiagnosticObservation<Vec<DiagnosticProfileChoice>> {
     match read_text(path) {
         DiagnosticObservation::Value { value } => {
             let mut choices = Vec::new();
             for command in value.split_ascii_whitespace() {
-                let Some(profile) = profile_for_command(command) else {
+                let Some(profile) = profile_for_command(command, performance_is_turbo) else {
                     return DiagnosticObservation::error(DiagnosticError::new(
                         DiagnosticErrorStage::Decode,
                         DiagnosticErrorClass::InvalidValue,
@@ -779,13 +806,14 @@ fn read_profile_choices(
     }
 }
 
-fn profile_for_command(value: &str) -> Option<DiagnosticProfileName> {
+fn profile_for_command(value: &str, performance_is_turbo: bool) -> Option<DiagnosticProfileName> {
     match value {
         "low-power" => Some(DiagnosticProfileName::Eco),
         "quiet" => Some(DiagnosticProfileName::Quiet),
         "balanced" => Some(DiagnosticProfileName::Balanced),
         "balanced-performance" => Some(DiagnosticProfileName::Performance),
-        "performance" => Some(DiagnosticProfileName::Turbo),
+        "performance" if performance_is_turbo => Some(DiagnosticProfileName::Turbo),
+        "performance" => Some(DiagnosticProfileName::Performance),
         _ => None,
     }
 }
@@ -819,7 +847,7 @@ fn collect_fans(root: &Path) -> DiagnosticFans {
     let diagnostic = find_wmi_group(&wmi_root, GAMING_WMI_GUID, "asense_diagnostics");
 
     let kernel_complete = hwmon.as_ref().is_some_and(|base| {
-        ["pwm1", "pwm2", "pwm1_enable", "pwm2_enable"]
+        ["pwm1_enable", "pwm2_enable"]
             .iter()
             .all(|name| base.join(name).is_file())
     });
@@ -827,38 +855,52 @@ fn collect_fans(root: &Path) -> DiagnosticFans {
         .as_ref()
         .is_some_and(|base| base.join("cpu_mode").is_file() && base.join("gpu_mode").is_file());
 
-    let control = if kernel_complete {
-        DiagnosticObservation::value(DiagnosticFanControl {
-            source: DiagnosticSource::AcerHwmon,
-            backend: DiagnosticFanBackend::KernelPwm,
-            modes: DiagnosticFanModes {
-                auto: true,
-                manual: true,
-                maximum: true,
-            },
-        })
-    } else if gaming_complete {
-        let base = gaming.as_ref().expect("complete Gaming-WMI group exists");
-        DiagnosticObservation::value(DiagnosticFanControl {
-            source: DiagnosticSource::GamingWmiFan,
-            backend: DiagnosticFanBackend::GamingWmi,
-            modes: DiagnosticFanModes {
-                auto: true,
-                manual: base.join("cpu_speed").is_file() && base.join("gpu_speed").is_file(),
-                maximum: true,
-            },
-        })
-    } else if diagnostic.is_some()
+    let interface_exposed = diagnostic.is_some()
+        || gaming_complete
         || hwmon.as_ref().is_some_and(|base| {
             (1_u8..=2).any(|channel| {
                 base.join(format!("pwm{channel}")).is_file()
                     || base.join(format!("pwm{channel}_enable")).is_file()
             })
-        })
-    {
-        DiagnosticObservation::absent(DiagnosticAbsence::IncompleteInterface)
-    } else {
-        DiagnosticObservation::absent(DiagnosticAbsence::NotExposed)
+        });
+    // Use the same read-only control eligibility as the command dispatcher.
+    // File presence alone must not advertise unsafe Manual percentages.
+    let control = match AcerHardware::discover_at(root) {
+        Ok(hardware) => {
+            let fans = hardware.capabilities().fans;
+            let backend = match fans.backend {
+                Some(FanBackend::KernelPwm) => {
+                    Some((DiagnosticSource::AcerHwmon, DiagnosticFanBackend::KernelPwm))
+                }
+                Some(FanBackend::AcerGamingWmi) => Some((
+                    DiagnosticSource::GamingWmiFan,
+                    DiagnosticFanBackend::GamingWmi,
+                )),
+                None => None,
+            };
+            match backend {
+                Some((source, backend)) => DiagnosticObservation::value(DiagnosticFanControl {
+                    source,
+                    backend,
+                    modes: DiagnosticFanModes {
+                        auto: fans.auto,
+                        manual: fans.manual,
+                        maximum: fans.maximum,
+                    },
+                }),
+                None => DiagnosticObservation::absent(if interface_exposed {
+                    DiagnosticAbsence::IncompleteInterface
+                } else {
+                    DiagnosticAbsence::NotExposed
+                }),
+            }
+        }
+        Err(HardwareError::Io { source, .. }) => DiagnosticObservation::error(io_error(&source)),
+        Err(_) => DiagnosticObservation::error(DiagnosticError::new(
+            DiagnosticErrorStage::Discover,
+            DiagnosticErrorClass::InvalidValue,
+            None,
+        )),
     };
 
     let kernel_has_setpoint = hwmon.as_ref().is_some_and(|base| {
@@ -1519,6 +1561,13 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();
+            fs::create_dir_all(path.join("sys/class/dmi/id")).unwrap();
+            fs::write(path.join("sys/class/dmi/id/sys_vendor"), "Acer\n").unwrap();
+            fs::write(
+                path.join("sys/class/dmi/id/product_name"),
+                "Compatibility fixture\n",
+            )
+            .unwrap();
             Self(path)
         }
 
@@ -1714,6 +1763,7 @@ mod tests {
             DiagnosticObservation::Value {
                 value: DiagnosticFanControl {
                     backend: DiagnosticFanBackend::GamingWmi,
+                    modes: DiagnosticFanModes { manual: false, .. },
                     ..
                 }
             }

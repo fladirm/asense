@@ -83,6 +83,8 @@ package() {
 
   install -Dm644 kernel/asense_rgb.c \
     "$pkgdir/usr/src/asense-rgb-${pkgver}/asense_rgb.c"
+  install -Dm644 kernel/asense_rgb_policy.h \
+    "$pkgdir/usr/src/asense-rgb-${pkgver}/asense_rgb_policy.h"
   install -Dm644 kernel/Makefile \
     "$pkgdir/usr/src/asense-rgb-${pkgver}/Makefile"
   install -Dm644 kernel/dkms.conf \
@@ -94,6 +96,10 @@ package() {
     "$pkgdir/usr/share/doc/asense/PROBE_PRIVACY.md"
   install -Dm644 docs/PROBE_SCHEMA_V3.md \
     "$pkgdir/usr/share/doc/asense/PROBE_SCHEMA_V3.md"
+  install -Dm644 docs/PROBE_SCHEMA_V4.md \
+    "$pkgdir/usr/share/doc/asense/PROBE_SCHEMA_V4.md"
+  install -Dm644 docs/SUPPORTED_HARDWARE.md \
+    "$pkgdir/usr/share/doc/asense/SUPPORTED_HARDWARE.md"
   install -Dm644 "docs/RELEASE_NOTES_v${pkgver}.md" \
     "$pkgdir/usr/share/doc/asense/RELEASE_NOTES.md"
 

@@ -239,25 +239,26 @@ fn controller_candidates(sysfs_root: &Path, dev_root: &Path) -> Vec<PathBuf> {
 }
 
 fn matches_uevent(uevent: &str) -> bool {
-    let mut id_match = false;
-    let mut name_match = false;
+    let mut identity = None;
     for line in uevent.lines() {
-        if let Some(name) = line.strip_prefix("HID_NAME=") {
-            name_match |= name.trim() == "ENEK5130";
-        }
         if let Some(id) = line.strip_prefix("HID_ID=") {
+            if identity.is_some() {
+                return false;
+            }
             let mut fields = id.trim().split(':');
             let (Some(bus), Some(vendor), Some(product), None) =
                 (fields.next(), fields.next(), fields.next(), fields.next())
             else {
-                continue;
+                return false;
             };
-            id_match |= u32::from_str_radix(bus, 16).ok() == Some(HID_BUS_I2C)
-                && u32::from_str_radix(vendor, 16).ok() == Some(HID_VENDOR)
-                && u32::from_str_radix(product, 16).ok() == Some(HID_PRODUCT);
+            identity = Some(
+                u32::from_str_radix(bus, 16).ok() == Some(HID_BUS_I2C)
+                    && u32::from_str_radix(vendor, 16).ok() == Some(HID_VENDOR)
+                    && u32::from_str_radix(product, 16).ok() == Some(HID_PRODUCT),
+            );
         }
     }
-    id_match || name_match
+    identity == Some(true)
 }
 
 fn target_id(target: LightingTarget) -> Option<u8> {
@@ -551,12 +552,19 @@ mod tests {
 
     #[test]
     fn matches_exact_i2c_hid_identity() {
-        assert!(matches_uevent("HID_NAME=ENEK5130\n"));
+        assert!(!matches_uevent("HID_NAME=ENEK5130\n"));
         assert!(matches_uevent("HID_ID=0018:00000CF2:00005130\n"));
         assert!(!matches_uevent("HID_ID=0003:00000CF2:00005130\n"));
         assert!(!matches_uevent(
             "HID_NAME=ENEK5130-clone\nHID_ID=0018:00000CF2:00005131\n"
         ));
+        assert!(!matches_uevent(
+            "HID_NAME=ENEK5130\nHID_ID=0003:00000D62:0000BA51\n"
+        ));
+        assert!(!matches_uevent(
+            "HID_ID=0018:00000CF2:00005130\nHID_ID=0003:00000D62:0000BA51\n"
+        ));
+        assert!(!matches_uevent("HID_ID=0018:00000CF2:00005130:00\n"));
     }
 
     #[test]

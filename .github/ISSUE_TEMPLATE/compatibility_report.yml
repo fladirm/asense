@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Reports from real laptops expand the model matrix. ASense capabilities
-        are independent, so partial results are useful too. Close ASense and
+        are independent, so partial results are useful too. The GUI may remain open;
         capture both forms consecutively without changing machine state:
 
         ```text
@@ -14,13 +14,13 @@ body:
         asense probe --summary
         ```
 
-        Schema 3 does not upload anything. Review the JSON before attaching it.
+        Schema 4 does not upload anything. Review the JSON before attaching it.
 
   - type: input
     id: version
     attributes:
       label: ASense version/build
-      placeholder: v0.3.0 package or exact commit
+      placeholder: v0.4.0 package or exact commit
     validations:
       required: true
 
@@ -87,7 +87,7 @@ body:
   - type: textarea
     id: probe_summary
     attributes:
-      label: Schema-3 probe summary
+      label: Schema-4 probe summary
       description: Paste the complete output of asense probe --summary.
       render: text
     validations:
@@ -96,11 +96,11 @@ body:
   - type: textarea
     id: probe
     attributes:
-      label: Schema-3 asense-probe.json
+      label: Schema-4 asense-probe.json
       description: >-
         Review the JSON generated immediately beside the summary, then drag
         asense-probe.json here. The JSON attachment is the evidence authority.
-      placeholder: Attach the schema-3 asense-probe.json file.
+      placeholder: Attach the schema-4 asense-probe.json file.
     validations:
       required: true
 

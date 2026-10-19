@@ -14,7 +14,7 @@ body:
     id: version
     attributes:
       label: ASense version
-      placeholder: v0.3.0 package or exact commit
+      placeholder: v0.4.0 package or exact commit
     validations:
       required: true
 
@@ -86,7 +86,7 @@ body:
   - type: textarea
     id: probe_summary
     attributes:
-      label: Schema-3 probe summary
+      label: Schema-4 probe summary
       description: Paste the complete output of asense probe --summary.
       render: text
     validations:
@@ -95,7 +95,7 @@ body:
   - type: textarea
     id: probe
     attributes:
-      label: Schema-3 asense-probe.json
+      label: Schema-4 asense-probe.json
       description: >-
         Review and attach the JSON generated immediately beside the summary.
         If the command itself fails, paste its exact error instead.

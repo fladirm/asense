@@ -254,7 +254,8 @@ render_dkms_source() {
     "$DKMS_CONF" >"$rendered"
   asense_root install -d -o root -g root -m 0755 "$destination"
   asense_root install -o root -g root -m 0644 \
-    "$ROOT/kernel/asense_rgb.c" "$ROOT/kernel/Makefile" "$destination/"
+    "$ROOT/kernel/asense_rgb.c" "$ROOT/kernel/asense_rgb_policy.h" \
+    "$ROOT/kernel/Makefile" "$destination/"
   asense_root install -o root -g root -m 0644 "$rendered" "$destination/dkms.conf"
 }
 

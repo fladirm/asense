@@ -241,6 +241,8 @@ pub struct PowerSupplyTelemetry {
     pub battery_status: Option<BatteryStatus>,
     pub ac_online: Option<bool>,
     pub usb_power_online: Option<bool>,
+    /// At least one enumerated power source could not be read or decoded.
+    pub read_error: bool,
 }
 
 pub struct TelemetryReader {
@@ -831,21 +833,35 @@ impl TelemetryReader {
 }
 
 fn read_power_supply(root: &Path) -> PowerSupplyTelemetry {
-    let Ok(entries) = fs::read_dir(rooted(root, "sys/class/power_supply")) else {
-        return PowerSupplyTelemetry::default();
+    let entries = match fs::read_dir(rooted(root, "sys/class/power_supply")) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return PowerSupplyTelemetry {
+                read_error: error.kind() != std::io::ErrorKind::NotFound,
+                ..PowerSupplyTelemetry::default()
+            };
+        }
     };
     let mut result = PowerSupplyTelemetry::default();
-    let mut saw_ac = false;
-    let mut saw_usb = false;
-    for entry in entries.flatten() {
+    let mut ac = OnlinePowerEvidence::default();
+    let mut usb = OnlinePowerEvidence::default();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                result.read_error = true;
+                continue;
+            }
+        };
         let path = entry.path();
         let Some(kind) = read_trimmed(&path.join("type")) else {
+            result.read_error = true;
             continue;
         };
         match kind.as_str() {
             "Battery" if result.battery_percent.is_none() => {
                 result.battery_percent =
-                    read_number::<u8>(&path.join("capacity")).map(|value| value.min(100));
+                    read_number::<u8>(&path.join("capacity")).filter(|value| *value <= 100);
                 result.battery_status =
                     read_trimmed(&path.join("status")).map(|status| match status.as_str() {
                         "Charging" => BatteryStatus::Charging,
@@ -856,28 +872,46 @@ fn read_power_supply(root: &Path) -> PowerSupplyTelemetry {
                     });
             }
             "Mains" => {
-                if let Some(online) = read_number::<u8>(&path.join("online")) {
-                    saw_ac = true;
-                    result.ac_online = Some(result.ac_online.unwrap_or(false) || online != 0);
-                }
+                ac.observe(read_number(&path.join("online")));
             }
             "USB" | "USB_C" | "USB_PD" => {
-                if let Some(online) = read_number::<u8>(&path.join("online")) {
-                    saw_usb = true;
-                    result.usb_power_online =
-                        Some(result.usb_power_online.unwrap_or(false) || online != 0);
-                }
+                usb.observe(read_number(&path.join("online")));
             }
             _ => {}
         }
     }
-    if !saw_ac {
-        result.ac_online = None;
-    }
-    if !saw_usb {
-        result.usb_power_online = None;
-    }
+    result.ac_online = ac.value();
+    result.usb_power_online = usb.value();
+    result.read_error |= ac.unreadable || usb.unreadable;
     result
+}
+
+#[derive(Default)]
+struct OnlinePowerEvidence {
+    present: bool,
+    online: bool,
+    unreadable: bool,
+}
+
+impl OnlinePowerEvidence {
+    fn observe(&mut self, value: Option<u8>) {
+        self.present = true;
+        match value {
+            Some(0) => {}
+            Some(1) => self.online = true,
+            _ => self.unreadable = true,
+        }
+    }
+
+    fn value(&self) -> Option<bool> {
+        if self.online {
+            Some(true)
+        } else if self.present && !self.unreadable {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 pub fn parse_cpu_times(proc_stat: &str) -> Result<CpuTimes, TelemetryError> {
@@ -1817,12 +1851,11 @@ fn millidegrees_to_celsius(value: i64) -> Option<f32> {
 fn unavailable_fan_state(rpm_channels: &[FanRpmChannel]) -> FanState {
     let channel = |index| FanChannelState {
         mode: None,
-        pwm_raw: 0,
+        pwm_raw: None,
         rpm: rpm_channels
             .iter()
             .find(|channel| channel.index == index)
-            .and_then(|channel| channel.rpm)
-            .unwrap_or(0),
+            .and_then(|channel| channel.rpm),
     };
     FanState {
         cpu: channel(1),
@@ -1923,8 +1956,8 @@ mod tests {
             },
         ];
         let state = unavailable_fan_state(&channels);
-        assert_eq!(state.cpu.rpm, 2600);
-        assert_eq!(state.gpu.rpm, 2400);
+        assert_eq!(state.cpu.rpm, Some(2600));
+        assert_eq!(state.gpu.rpm, Some(2400));
         assert_eq!(state.cpu.mode, None);
         assert_eq!(state.gpu.mode, None);
     }
@@ -1967,13 +2000,27 @@ mod tests {
 
         assert_eq!(sample.profile_raw.as_deref(), Some("cool"));
         assert_eq!(sample.profile, None);
-        assert_eq!(sample.fans.cpu.rpm, 2500);
-        assert_eq!(sample.fans.gpu.rpm, 2300);
+        assert_eq!(sample.fans.cpu.rpm, Some(2500));
+        assert_eq!(sample.fans.gpu.rpm, Some(2300));
         assert_eq!(sample.fan_rpm_channels.len(), 3);
         assert_eq!(sample.fan_rpm_channels[2].label, "System");
         assert_eq!(sample.fan_rpm_channels[2].rpm, Some(1700));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_power_source_never_becomes_offline_or_online() {
+        let mut evidence = super::OnlinePowerEvidence::default();
+        assert_eq!(evidence.value(), None);
+        evidence.observe(Some(0));
+        assert_eq!(evidence.value(), Some(false));
+        evidence.observe(Some(2));
+        assert_eq!(evidence.value(), None);
+        assert!(evidence.unreadable);
+        evidence.observe(Some(1));
+        assert_eq!(evidence.value(), Some(true));
+        assert!(evidence.unreadable);
     }
 
     #[test]
@@ -2000,6 +2047,7 @@ mod tests {
                 battery_status: Some(BatteryStatus::Discharging),
                 ac_online: Some(true),
                 usb_power_online: Some(false),
+                read_error: false,
             }
         );
         fs::remove_dir_all(root).unwrap();

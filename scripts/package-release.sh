@@ -74,11 +74,13 @@ checksums="$ROOT/SHA256SUMS"
 temporary="$(mktemp -d)"
 trap 'rm -rf -- "$temporary"' EXIT INT TERM
 export CARGO_TARGET_DIR="$temporary/cargo-target"
+export CARGO_ENCODED_RUSTFLAGS+="${rustflag_separator}--remap-path-prefix=$temporary=/usr/src/asense-build${rustflag_separator}--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/usr/src/cargo-home"
 
 cargo build --release --locked --bin asensed --no-default-features
 cargo build --release --locked --bin asense --features gui
 for binary in "$CARGO_TARGET_DIR/release/asense" "$CARGO_TARGET_DIR/release/asensed"; do
-  if strings "$binary" | grep -F -e "$ROOT" -e "$HOME" >/dev/null; then
+  if strings "$binary" | grep -F -e "$ROOT" -e "$HOME" \
+    -e "$temporary" -e "${CARGO_HOME:-$HOME/.cargo}" >/dev/null; then
     printf 'asense-release: local build path remained in %s\n' "$binary" >&2
     exit 1
   fi
@@ -96,8 +98,9 @@ install -m 0644 docs/screenshots/asense-compact.png \
   docs/screenshots/asense-advanced.png "$bundle/docs/screenshots/"
 install -m 0644 docs/asense-bitcoin-qr.png docs/asense-paypal-qr.png "$bundle/docs/"
 install -m 0644 docs/PROBE_PRIVACY.md docs/PROBE_SCHEMA_V3.md \
-  docs/RELEASING.md "$bundle/docs/"
-install -m 0644 kernel/LICENSE kernel/Makefile kernel/asense_rgb.c kernel/dkms.conf \
+  docs/PROBE_SCHEMA_V4.md docs/SUPPORTED_HARDWARE.md \
+  "docs/RELEASE_NOTES_v$version.md" docs/RELEASING.md "$bundle/docs/"
+install -m 0644 kernel/LICENSE kernel/Makefile kernel/asense_rgb.c kernel/asense_rgb_policy.h kernel/dkms.conf \
   "$bundle/kernel/"
 install -m 0644 packaging/71-asense-hid.rules \
   packaging/90-asense-predator-key.hwdb \

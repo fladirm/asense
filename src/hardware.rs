@@ -32,6 +32,8 @@ pub enum HardwareError {
         product: String,
     },
     AcerHwmonNotFound,
+    FanControlUnavailable,
+    ManualFanUnavailable,
     MissingInterface(PathBuf),
     InvalidValue {
         field: &'static str,
@@ -70,6 +72,14 @@ impl fmt::Display for HardwareError {
                 "unsupported platform (vendor={vendor:?}, product={product:?}); expected an Acer system"
             ),
             Self::AcerHwmonNotFound => write!(f, "acer hwmon interface was not found"),
+            Self::FanControlUnavailable => write!(
+                f,
+                "no usable Acer fan-control interface; inspect the mode readback and driver capabilities"
+            ),
+            Self::ManualFanUnavailable => write!(
+                f,
+                "manual fan control requires readable speed setpoints and valid CPU/GPU watchdog temperatures"
+            ),
             Self::MissingInterface(path) => {
                 write!(
                     f,
@@ -277,13 +287,14 @@ pub struct FanChannelState {
     /// explicit instead of discarding otherwise valid fan telemetry or
     /// guessing a mode.
     pub mode: Option<FanMode>,
-    pub pwm_raw: u8,
-    pub rpm: u32,
+    pub pwm_raw: Option<u8>,
+    pub rpm: Option<u32>,
 }
 
 impl FanChannelState {
-    pub fn pwm_percent(self) -> f32 {
-        f32::from(self.pwm_raw) * 100.0 / PWM_MAX as f32
+    pub fn pwm_percent(self) -> Option<f32> {
+        self.pwm_raw
+            .map(|value| f32::from(value) * 100.0 / PWM_MAX as f32)
     }
 }
 
@@ -314,11 +325,15 @@ struct ProfileInterface {
     backend: ProfileBackend,
     profile: PathBuf,
     choices: PathBuf,
+    /// Known Acer handlers map `performance` to firmware Turbo and
+    /// `balanced-performance` to Performance. The unnamed legacy handler
+    /// does not provide enough identity to make that assertion.
+    performance_is_turbo: bool,
 }
 
 #[derive(Clone, Debug)]
 enum FanInterface {
-    KernelPwm { base: PathBuf },
+    KernelPwm { base: PathBuf, manual: bool },
     AcerGamingWmi { base: PathBuf, manual: bool },
 }
 
@@ -341,6 +356,10 @@ impl AcerHardware {
     /// Discover the real machine interfaces under `/`.
     pub fn discover() -> Result<Self, HardwareError> {
         Self::discover_at(Path::new("/"))
+    }
+
+    pub(crate) fn refreshed(&self) -> Result<Self, HardwareError> {
+        Self::discover_at(&self.root)
     }
 
     /// Discover against an alternate filesystem root.  This is intended for
@@ -433,7 +452,11 @@ impl AcerHardware {
             .split_ascii_whitespace()
             .map(|raw| ProfileChoice {
                 raw: raw.to_string(),
-                label: profile_label(raw),
+                label: if self.performance_is_turbo() && raw == "performance" {
+                    "Turbo".to_string()
+                } else {
+                    profile_label(raw)
+                },
                 selectable: self.platform.acer
                     && raw != "custom"
                     && (!self.is_reference_model() || PlatformProfile::from_sysfs(raw).is_ok()),
@@ -446,7 +469,9 @@ impl AcerHardware {
         let current = self.current_profile_raw().ok();
         let rpm_channels = self.fan_rpm_channels();
         let (backend, auto, manual, maximum) = match &self.fan_backend {
-            Some(FanInterface::KernelPwm { .. }) => (Some(FanBackend::KernelPwm), true, true, true),
+            Some(FanInterface::KernelPwm { manual, .. }) => {
+                (Some(FanBackend::KernelPwm), true, *manual, true)
+            }
             Some(FanInterface::AcerGamingWmi { manual, .. }) => {
                 (Some(FanBackend::AcerGamingWmi), true, *manual, true)
             }
@@ -475,6 +500,32 @@ impl AcerHardware {
         self.platform.acer && self.platform.product == REFERENCE_PRODUCT
     }
 
+    pub(crate) fn performance_is_turbo(&self) -> bool {
+        self.is_reference_model()
+            || self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.performance_is_turbo)
+    }
+
+    pub(crate) fn fan_control_exposed(&self) -> bool {
+        self.is_acer()
+            && (self.hwmon.as_ref().is_some_and(|base| {
+                ["pwm1_enable", "pwm2_enable"]
+                    .iter()
+                    .any(|name| base.join(name).exists())
+            }) || find_wmi_group(
+                &rooted(&self.root, "sys/bus/wmi/devices"),
+                GAMING_WMI_GUID,
+                "gaming_fan",
+            )
+            .is_some_and(|base| {
+                ["cpu_mode", "gpu_mode"]
+                    .iter()
+                    .any(|name| base.join(name).exists())
+            }))
+    }
+
     pub fn is_acer(&self) -> bool {
         self.platform.acer
     }
@@ -486,21 +537,21 @@ impl AcerHardware {
     pub fn apply_fan_setting(&self, setting: FanSetting) -> Result<FanState, HardwareError> {
         self.require_acer()?;
         if self.fan_backend.is_none() {
-            return Err(HardwareError::MissingInterface(rooted(
-                &self.root,
-                "sys/class/hwmon/acer-fan-control",
-            )));
+            return Err(HardwareError::FanControlUnavailable);
         }
         if matches!(setting, FanSetting::Manual { .. })
             && matches!(
                 &self.fan_backend,
                 Some(FanInterface::AcerGamingWmi { manual: false, .. })
+                    | Some(FanInterface::KernelPwm { manual: false, .. })
             )
         {
-            return Err(HardwareError::MissingInterface(rooted(
-                &self.root,
-                "sys/bus/wmi/devices/gaming_fan/cpu_speed",
-            )));
+            return Err(HardwareError::ManualFanUnavailable);
+        }
+        if matches!(setting, FanSetting::Manual { .. })
+            && !self.hwmon.as_deref().is_some_and(manual_watchdog_available)
+        {
+            return Err(HardwareError::ManualFanUnavailable);
         }
         let mutation = match setting {
             FanSetting::Automatic => self.set_both_modes(FanMode::Automatic),
@@ -511,7 +562,12 @@ impl AcerHardware {
             } => self.set_manual(cpu_percent, gpu_percent),
         };
 
-        match mutation.and_then(|()| self.read_fan_state()) {
+        let expected_mode = match setting {
+            FanSetting::Automatic => FanMode::Automatic,
+            FanSetting::Maximum => FanMode::Maximum,
+            FanSetting::Manual { .. } => FanMode::Manual,
+        };
+        match mutation.and_then(|()| self.read_verified_fan_state(expected_mode)) {
             Ok(state) => Ok(state),
             Err(cause) => match self.force_automatic_unchecked() {
                 Ok(()) => Err(HardwareError::MutationRolledBack {
@@ -539,13 +595,25 @@ impl AcerHardware {
         })
     }
 
+    fn read_verified_fan_state(&self, expected: FanMode) -> Result<FanState, HardwareError> {
+        let state = self.read_fan_state()?;
+        for actual in [state.cpu.mode, state.gpu.mode] {
+            ensure_readback(
+                "fan mode",
+                expected.as_sysfs(),
+                actual.map_or("unavailable", FanMode::as_sysfs),
+            )?;
+        }
+        Ok(state)
+    }
+
     pub(crate) fn read_acer_temp_millidegrees(&self, channel: u8) -> Result<i64, HardwareError> {
         let base = self
             .hwmon
             .as_ref()
             .ok_or(HardwareError::AcerHwmonNotFound)?;
         let path = acer_temperature_path(base, channel);
-        parse_value(&path, "temperature")
+        read_watchdog_temperature(&path)
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -553,15 +621,16 @@ impl AcerHardware {
     }
 
     fn read_fan_channel(&self, channel: u8) -> Result<FanChannelState, HardwareError> {
-        let rpm = self.read_rpm(channel).unwrap_or(0);
+        let rpm = self.read_rpm(channel).ok();
         let (mode, pwm_raw) = match &self.fan_backend {
-            Some(FanInterface::KernelPwm { base }) => {
+            Some(FanInterface::KernelPwm { base, .. }) => {
                 let mode = read_optional_fan_mode(&base.join(format!("pwm{channel}_enable")))?;
-                let pwm: u32 = parse_value(&base.join(format!("pwm{channel}")), "PWM")?;
-                let pwm_raw = u8::try_from(pwm).map_err(|_| HardwareError::InvalidValue {
-                    field: "PWM",
-                    value: pwm.to_string(),
-                })?;
+                // Setpoints are optional observations for Auto/Maximum.
+                // Manual writes still require their own strict readback;
+                // passive diagnostics retain the individual read error.
+                let pwm_raw = read_optional_pwm(&base.join(format!("pwm{channel}")))
+                    .ok()
+                    .flatten();
                 (mode, pwm_raw)
             }
             Some(FanInterface::AcerGamingWmi { base, manual }) => {
@@ -579,13 +648,13 @@ impl AcerHardware {
                             value: value.to_string(),
                         });
                     }
-                    value
+                    Some(percent_to_pwm(value))
                 } else {
-                    0
+                    None
                 };
-                (Some(mode), percent_to_pwm(percent))
+                (Some(mode), percent)
             }
-            None => (None, 0),
+            None => (None, None),
         };
         Ok(FanChannelState { mode, pwm_raw, rpm })
     }
@@ -694,7 +763,7 @@ impl AcerHardware {
 
     fn write_speed_percent(&self, channel: u8, percent: u8) -> Result<(), HardwareError> {
         let (path, value) = match &self.fan_backend {
-            Some(FanInterface::KernelPwm { base }) => (
+            Some(FanInterface::KernelPwm { base, .. }) => (
                 base.join(format!("pwm{channel}")),
                 percent_to_pwm(percent).to_string(),
             ),
@@ -714,7 +783,7 @@ impl AcerHardware {
 
     fn verify_pwm_percent(&self, channel: u8, expected_percent: u8) -> Result<(), HardwareError> {
         let path = match &self.fan_backend {
-            Some(FanInterface::KernelPwm { base }) => base.join(format!("pwm{channel}")),
+            Some(FanInterface::KernelPwm { base, .. }) => base.join(format!("pwm{channel}")),
             Some(FanInterface::AcerGamingWmi { base, manual: true }) => {
                 base.join(format!("{}_speed", fan_role(channel)?))
             }
@@ -752,7 +821,9 @@ impl AcerHardware {
 
     fn mode_path(&self, channel: u8) -> Result<PathBuf, HardwareError> {
         match &self.fan_backend {
-            Some(FanInterface::KernelPwm { base }) => Ok(base.join(format!("pwm{channel}_enable"))),
+            Some(FanInterface::KernelPwm { base, .. }) => {
+                Ok(base.join(format!("pwm{channel}_enable")))
+            }
             Some(FanInterface::AcerGamingWmi { base, .. }) => {
                 Ok(base.join(format!("{}_mode", fan_role(channel)?)))
             }
@@ -865,11 +936,13 @@ fn discover_kernel_profile_interface(root: &Path) -> Option<ProfileInterface> {
             }
             let name = fs::read_to_string(path.join("name"))
                 .unwrap_or_else(|_| entry.file_name().to_string_lossy().into_owned());
-            if name.to_ascii_lowercase().contains("acer") {
+            let name = name.trim().to_ascii_lowercase();
+            if name.contains("acer") {
                 candidates.push(ProfileInterface {
                     backend: ProfileBackend::Kernel,
                     profile,
                     choices,
+                    performance_is_turbo: name == "acer-wmi",
                 });
             }
         }
@@ -886,6 +959,9 @@ fn discover_kernel_profile_interface(root: &Path) -> Option<ProfileInterface> {
             backend: ProfileBackend::Kernel,
             profile: legacy_profile,
             choices: legacy_choices,
+            // The legacy global file does not name its handler, so it may
+            // belong to a non-Acer driver whose `performance` is not Turbo.
+            performance_is_turbo: false,
         });
     }
 
@@ -906,32 +982,38 @@ fn discover_gaming_wmi_profile_interface(root: &Path) -> Option<ProfileInterface
             backend: ProfileBackend::AcerGamingWmi,
             profile,
             choices,
+            // Our gaming_profile ABI maps raw 0x05 to `performance` (Turbo)
+            // and raw 0x04 to `balanced-performance` (Performance).
+            performance_is_turbo: true,
         });
     }
     None
 }
 
 fn discover_kernel_fan_interface(hwmon: Option<&Path>) -> Option<FanInterface> {
+    discover_kernel_fan_interface_with_reader(hwmon, |path| read_trimmed(path, "probe fan mode"))
+}
+
+fn discover_kernel_fan_interface_with_reader(
+    hwmon: Option<&Path>,
+    read_mode: impl Fn(&Path) -> Result<String, HardwareError>,
+) -> Option<FanInterface> {
     let base = hwmon?;
-    let complete = [
-        "fan1_input",
-        "fan2_input",
-        "pwm1",
-        "pwm2",
-        "pwm1_enable",
-        "pwm2_enable",
-    ]
-    .into_iter()
-    .all(|name| base.join(name).is_file())
-        && (1_u8..=2).all(|channel| acer_temperature_path(base, channel).is_file());
-    let modes_are_readable = (1_u8..=2).all(|channel| {
-        read_trimmed(&base.join(format!("pwm{channel}_enable")), "probe fan mode")
-            .and_then(|value| FanMode::from_sysfs(&value))
-            .is_ok()
+    let complete = ["pwm1_enable", "pwm2_enable"]
+        .into_iter()
+        .all(|name| base.join(name).is_file());
+    let modes_are_usable = (1_u8..=2).all(|channel| {
+        optional_fan_mode(read_mode(&base.join(format!("pwm{channel}_enable")))).is_ok()
     });
-    if complete && modes_are_readable {
+    if complete && modes_are_usable {
+        let manual = manual_watchdog_available(base)
+            && (1_u8..=2).all(|channel| {
+                read_optional_pwm(&base.join(format!("pwm{channel}")))
+                    .is_ok_and(|value| value.is_some())
+            });
         return Some(FanInterface::KernelPwm {
             base: base.to_path_buf(),
+            manual,
         });
     }
     None
@@ -954,11 +1036,7 @@ fn discover_gaming_wmi_fan_interface(root: &Path, hwmon: Option<&Path>) -> Optio
     if !behavior_is_readable {
         return None;
     }
-    let temperatures_are_readable = hwmon.is_some_and(|base| {
-        (1_u8..=2).all(|channel| {
-            parse_value::<i64>(&acer_temperature_path(base, channel), "temperature").is_ok()
-        })
-    });
+    let temperatures_are_readable = hwmon.is_some_and(manual_watchdog_available);
     let manual = temperatures_are_readable
         && ["cpu_speed", "gpu_speed"].into_iter().all(|name| {
             parse_value::<u8>(&base.join(name), "Gaming-WMI fan speed")
@@ -1021,11 +1099,45 @@ fn fan_role(channel: u8) -> Result<&'static str, HardwareError> {
 }
 
 fn read_optional_fan_mode(path: &Path) -> Result<Option<FanMode>, HardwareError> {
-    match read_trimmed(path, "read fan mode") {
+    optional_fan_mode(read_trimmed(path, "read fan mode"))
+}
+
+fn optional_fan_mode(
+    observation: Result<String, HardwareError>,
+) -> Result<Option<FanMode>, HardwareError> {
+    match observation {
         Ok(value) => FanMode::from_sysfs(&value).map(Some),
         Err(error) if is_unavailable_fan_mode(&error) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn read_optional_pwm(path: &Path) -> Result<Option<u8>, HardwareError> {
+    match parse_value(path, "PWM") {
+        Ok(value) => Ok(Some(value)),
+        Err(HardwareError::Io { source, .. })
+            if matches!(source.raw_os_error(), Some(libc::ENXIO | libc::ENOENT)) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn read_watchdog_temperature(path: &Path) -> Result<i64, HardwareError> {
+    let value: i64 = parse_value(path, "temperature")?;
+    if !(-50_000..=200_000).contains(&value) {
+        return Err(HardwareError::InvalidValue {
+            field: "temperature",
+            value: value.to_string(),
+        });
+    }
+    Ok(value)
+}
+
+fn manual_watchdog_available(base: &Path) -> bool {
+    (1_u8..=2)
+        .all(|channel| read_watchdog_temperature(&acer_temperature_path(base, channel)).is_ok())
 }
 
 fn is_unavailable_fan_mode(error: &HardwareError) -> bool {
@@ -1378,6 +1490,69 @@ mod tests {
     }
 
     #[test]
+    fn only_identified_acer_handlers_label_performance_as_turbo() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root.join("sys/class/dmi/id/product_name"),
+            "Predator PHN16S-71\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture
+                .root
+                .join("sys/firmware/acpi/platform_profile_choices"),
+            "low-power balanced balanced-performance performance\n",
+        )
+        .unwrap();
+        let label = |hardware: &AcerHardware, raw: &str| {
+            hardware
+                .profile_choices()
+                .unwrap()
+                .into_iter()
+                .find(|choice| choice.raw == raw)
+                .unwrap()
+                .label
+        };
+        // An unnamed legacy handler may belong to a non-Acer driver.
+        let legacy = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&legacy, "performance"), "Performance");
+
+        let handler = fixture
+            .root
+            .join("sys/class/platform-profile/platform-profile-0");
+        fs::create_dir_all(&handler).unwrap();
+        fs::write(handler.join("name"), "acer-wmi\n").unwrap();
+        fs::write(handler.join("profile"), "balanced\n").unwrap();
+        fs::write(
+            handler.join("choices"),
+            "low-power quiet balanced balanced-performance performance\n",
+        )
+        .unwrap();
+        let acer_wmi = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&acer_wmi, "performance"), "Turbo");
+        assert_eq!(
+            label(&acer_wmi, "balanced-performance"),
+            "Balanced performance"
+        );
+
+        fs::write(handler.join("name"), "acer-other\n").unwrap();
+        let other = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&other, "performance"), "Performance");
+
+        fs::remove_dir_all(&handler).unwrap();
+        fs::remove_file(fixture.root.join("sys/firmware/acpi/platform_profile")).unwrap();
+        fs::remove_file(
+            fixture
+                .root
+                .join("sys/firmware/acpi/platform_profile_choices"),
+        )
+        .unwrap();
+        fixture.gaming_profile();
+        let gaming = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(label(&gaming, "performance"), "Turbo");
+    }
+
+    #[test]
     fn generic_acer_unknown_live_profile_token_is_selectable_and_bounded() {
         let fixture = Fixture::new();
         fs::write(
@@ -1495,8 +1670,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state.cpu.mode, Some(FanMode::Manual));
-        assert_eq!(pwm_to_percent(state.cpu.pwm_raw), 60);
-        assert_eq!(pwm_to_percent(state.gpu.pwm_raw), 40);
+        assert_eq!(pwm_to_percent(state.cpu.pwm_raw.unwrap()), 60);
+        assert_eq!(pwm_to_percent(state.gpu.pwm_raw.unwrap()), 40);
     }
 
     #[test]
@@ -1614,8 +1789,38 @@ mod tests {
             .unwrap();
         assert_eq!(state.cpu.mode, Some(FanMode::Manual));
         assert_eq!(state.gpu.mode, Some(FanMode::Manual));
-        assert_eq!(state.cpu.pwm_raw, 153);
-        assert_eq!(state.gpu.pwm_raw, 102);
+        assert_eq!(state.cpu.pwm_raw, Some(153));
+        assert_eq!(state.gpu.pwm_raw, Some(102));
+    }
+
+    #[test]
+    fn unavailable_optional_pwm_does_not_reject_verified_auto_or_maximum() {
+        let fixture = Fixture::new();
+        fs::write(fixture.hwmon().join("pwm1"), "not-a-setpoint\n").unwrap();
+        let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert!(!hardware.capabilities().fans.manual);
+        for setting in [FanSetting::Maximum, FanSetting::Automatic] {
+            let state = hardware.apply_fan_setting(setting).unwrap();
+            assert_eq!(state.cpu.pwm_raw, None);
+            assert_eq!(state.cpu.mode, state.gpu.mode);
+        }
+    }
+
+    #[test]
+    fn final_mode_readback_rejects_an_unexpected_firmware_override() {
+        let fixture = Fixture::new();
+        let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+        hardware
+            .apply_fan_setting(FanSetting::Manual {
+                cpu_percent: 60,
+                gpu_percent: 60,
+            })
+            .unwrap();
+        fs::write(fixture.hwmon().join("pwm1_enable"), "0\n").unwrap();
+        assert!(matches!(
+            hardware.read_verified_fan_state(FanMode::Manual),
+            Err(HardwareError::ReadbackMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1691,7 +1896,10 @@ mod tests {
             );
             assert_eq!(
                 (state.cpu.pwm_raw, state.gpu.pwm_raw),
-                (percent_to_pwm(cpu_percent), percent_to_pwm(gpu_percent))
+                (
+                    Some(percent_to_pwm(cpu_percent)),
+                    Some(percent_to_pwm(gpu_percent))
+                )
             );
         }
     }
@@ -1724,13 +1932,126 @@ mod tests {
     }
 
     #[test]
+    fn kernel_fan_enxio_mode_getter_keeps_the_control_interface() {
+        let fixture = Fixture::new();
+        let probe = |code| {
+            super::discover_kernel_fan_interface_with_reader(Some(&fixture.hwmon()), |path| {
+                Err(HardwareError::Io {
+                    operation: "read fan mode",
+                    path: path.to_path_buf(),
+                    source: std::io::Error::from_raw_os_error(code),
+                })
+            })
+        };
+        assert!(matches!(
+            probe(libc::ENXIO),
+            Some(super::FanInterface::KernelPwm { manual: true, .. })
+        ));
+        for code in [
+            libc::ENOENT,
+            libc::EACCES,
+            libc::EIO,
+            libc::ENODEV,
+            libc::EAGAIN,
+        ] {
+            assert!(probe(code).is_none(), "must preserve fan mode error {code}");
+        }
+    }
+
+    #[test]
+    fn kernel_fan_mode_control_does_not_require_speed_setpoints() {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.hwmon().join("pwm1")).unwrap();
+        fs::remove_file(fixture.hwmon().join("pwm2")).unwrap();
+        let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+        let fans = hardware.capabilities().fans;
+        assert_eq!(fans.backend, Some(FanBackend::KernelPwm));
+        assert!(!fans.manual);
+        let state = hardware.apply_fan_setting(FanSetting::Maximum).unwrap();
+        assert_eq!(state.cpu.mode, Some(FanMode::Maximum));
+        assert_eq!(state.cpu.pwm_raw, None);
+        assert_eq!(state.gpu.pwm_percent(), None);
+    }
+
+    #[test]
+    fn manual_rechecks_watchdog_sensors_before_writing() {
+        let fixture = Fixture::new();
+        let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert!(hardware.capabilities().fans.manual);
+        fs::remove_file(fixture.hwmon().join("temp2_input")).unwrap();
+        assert!(matches!(
+            hardware.apply_fan_setting(FanSetting::Manual {
+                cpu_percent: 50,
+                gpu_percent: 50,
+            }),
+            Err(HardwareError::ManualFanUnavailable)
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.hwmon().join("pwm1_enable"))
+                .unwrap()
+                .trim(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn kernel_fan_control_does_not_require_tachometers() {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.hwmon().join("fan1_input")).unwrap();
+        fs::remove_file(fixture.hwmon().join("fan2_input")).unwrap();
+        let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+        assert_eq!(
+            hardware.capabilities().fans.backend,
+            Some(FanBackend::KernelPwm)
+        );
+        let state = hardware.apply_fan_setting(FanSetting::Maximum).unwrap();
+        assert_eq!(state.cpu.mode, Some(FanMode::Maximum));
+        assert_eq!(state.gpu.mode, Some(FanMode::Maximum));
+        assert!(hardware.fan_rpm_channels().is_empty());
+    }
+
+    #[test]
+    fn kernel_fan_missing_temperature_gates_manual_only() {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.hwmon().join("temp2_input")).unwrap();
+        let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+        let fans = hardware.capabilities().fans;
+        assert_eq!(fans.backend, Some(FanBackend::KernelPwm));
+        assert!(fans.auto && fans.maximum);
+        assert!(!fans.manual);
+        assert!(
+            hardware
+                .apply_fan_setting(FanSetting::Manual {
+                    cpu_percent: 50,
+                    gpu_percent: 50,
+                })
+                .is_err()
+        );
+        hardware.apply_fan_setting(FanSetting::Maximum).unwrap();
+        hardware.apply_fan_setting(FanSetting::Automatic).unwrap();
+    }
+
+    #[test]
+    fn kernel_fan_invalid_temperature_does_not_enable_manual() {
+        for value in ["unavailable", "-50001", "200001"] {
+            let fixture = Fixture::new();
+            fs::write(fixture.hwmon().join("temp1_input"), value).unwrap();
+            let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
+            let fans = hardware.capabilities().fans;
+            assert_eq!(fans.backend, Some(FanBackend::KernelPwm));
+            assert!(fans.auto && fans.maximum);
+            assert!(!fans.manual, "invalid watchdog temperature {value}");
+        }
+    }
+
+    #[test]
     fn rpm_disappearance_does_not_turn_a_successful_control_readback_into_failure() {
         let fixture = Fixture::new();
         let hardware = AcerHardware::discover_at(&fixture.root).unwrap();
         fs::remove_file(fixture.hwmon().join("fan1_input")).unwrap();
         let state = hardware.apply_fan_setting(FanSetting::Maximum).unwrap();
         assert_eq!(state.cpu.mode, Some(FanMode::Maximum));
-        assert_eq!(state.cpu.rpm, 0);
+        assert_eq!(state.cpu.rpm, None);
         assert_eq!(
             fs::read_to_string(fixture.hwmon().join("pwm1_enable"))
                 .unwrap()

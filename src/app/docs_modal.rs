@@ -81,6 +81,7 @@ for command in (b"HELLO 2\n", b"CAPS\n"):
 
 const API_COMMANDS: &str = r#"PING
 CAPS
+DIAG PASSIVE
 HARDWARE GET
 PLATFORM GET
 PROFILE <raw-token-from-CAPS>
@@ -105,6 +106,8 @@ enum SupportMark {
     LinuxProbe,
     Known,
     Probe,
+    Community,
+    CommunityProbe,
 }
 
 impl SupportMark {
@@ -115,6 +118,8 @@ impl SupportMark {
             Self::LinuxProbe => "🟢·🔎",
             Self::Known => "🟡",
             Self::Probe => "🔎",
+            Self::Community => "🤝",
+            Self::CommunityProbe => "🤝·🔎",
         }
     }
 
@@ -125,6 +130,9 @@ impl SupportMark {
             Self::LinuxProbe => text(language, MessageId::DocsLabel003),
             Self::Known => text(language, MessageId::DocsLabel004),
             Self::Probe => text(language, MessageId::DocsLabel005),
+            Self::Community | Self::CommunityProbe => {
+                text(language, MessageId::DocsHardwarePane009)
+            }
         }
     }
 }
@@ -138,7 +146,7 @@ struct SupportRow {
     platform: SupportMark,
 }
 
-const fn core_support_rows() -> [SupportRow; 11] {
+const fn core_support_rows() -> [SupportRow; 16] {
     [
         SupportRow {
             model: "PHN16-72",
@@ -198,9 +206,44 @@ const fn core_support_rows() -> [SupportRow; 11] {
         },
         SupportRow {
             model: "PHN16S-71",
+            profiles: SupportMark::Community,
+            fans: SupportMark::Community,
+            lighting: SupportMark::Known,
+            platform: SupportMark::Probe,
+        },
+        SupportRow {
+            model: "PH18-73",
+            profiles: SupportMark::Probe,
+            fans: SupportMark::CommunityProbe,
+            lighting: SupportMark::Probe,
+            platform: SupportMark::Probe,
+        },
+        SupportRow {
+            model: "AN17-51",
             profiles: SupportMark::Probe,
             fans: SupportMark::Probe,
-            lighting: SupportMark::Known,
+            lighting: SupportMark::Community,
+            platform: SupportMark::Probe,
+        },
+        SupportRow {
+            model: "AN14-41",
+            profiles: SupportMark::Probe,
+            fans: SupportMark::Probe,
+            lighting: SupportMark::Community,
+            platform: SupportMark::Probe,
+        },
+        SupportRow {
+            model: "AN16-51",
+            profiles: SupportMark::Probe,
+            fans: SupportMark::CommunityProbe,
+            lighting: SupportMark::Community,
+            platform: SupportMark::Probe,
+        },
+        SupportRow {
+            model: "ANV15-52",
+            profiles: SupportMark::Probe,
+            fans: SupportMark::Probe,
+            lighting: SupportMark::Probe,
             platform: SupportMark::Probe,
         },
         SupportRow {

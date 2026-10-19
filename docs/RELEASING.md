@@ -23,8 +23,10 @@ strict Clippy for the full application and the GUI-free daemon, shell syntax,
 systemd units, the exact Predator-key HWDB entry and the DKMS module against
 every installed header tree. Before release, also confirm that protocol 2
 negotiation and `CAPS` fixtures, dynamic profile/hwmon paths, zoned WMI,
-ENEK5130 discovery and the sanitized probe privacy tests are included in the
-green test run.
+exact ENEK5130 discovery, descriptor-only Darfon inventory, original
+schema-3 reopening, schema-4 privacy tests and the native C lighting policy
+harness are included in the green test run. Keep GUI/probe concurrency,
+optional RPM/PWM observations, lease preemption and watchdog recovery covered.
 
 Commit the intended state and run the gate once more. Local assets can then be
 created from the clean commit with:
@@ -178,7 +180,8 @@ Before considering the release complete:
 1. download the final tagged installer ZIP and checksum from GitHub;
 2. verify that it has the accepted commit suffix and matching checksum;
 3. confirm protocol 2, `CAPS`, profiles, fan sessions, lighting, Battery/APGE,
-   exact NVIDIA and hotkey behaviour, suspend/resume and uninstall;
+   exact NVIDIA and hotkey behaviour, concurrent GUI/probe, suspend/resume
+   and uninstall;
 4. run `asense probe` and `asense probe --summary`, review the JSON for the
    documented privacy boundary and confirm the probe sends only `HELLO 2` then
    `DIAG PASSIVE`, never `CAPS` or a mutation command;

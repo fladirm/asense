@@ -102,10 +102,14 @@ fn schema_three_client_and_probe_use_diag_without_caps_fallback() {
 #[test]
 fn daemon_diag_branch_only_collects_and_encodes_passive_evidence() {
     let branch = between(DAEMON, "[\"DIAG\", \"PASSIVE\"] => {", "[\"CAPS\"] => {");
-    assert!(branch.contains("PassiveDiagnostics::collect()"));
+    assert!(branch.contains("PassiveDiagnostics::collect_at(hardware.root())"));
+    assert_eq!(
+        branch.matches("hardware.").count(),
+        1,
+        "DIAG may only read the fixed hardware root"
+    );
     assert!(branch.contains("encode_passive_diagnostics(&diagnostics)"));
     for forbidden in [
-        "hardware.",
         "MutationGuard",
         "LightingController",
         "restore_cached_enek_lighting",

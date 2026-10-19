@@ -214,7 +214,7 @@ impl ControlClient {
         parse_control_capabilities(&response)
     }
 
-    /// Returns the one bounded diagnostic snapshot used by probe schema 3.
+    /// Returns the one bounded diagnostic snapshot used by the passive probe.
     /// This command is deliberately distinct from `CAPS`: it does not perform
     /// lighting discovery or any other selector/write transaction.
     pub(crate) fn passive_diagnostics(&mut self) -> ControlResult<PassiveDiagnostics> {

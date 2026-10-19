@@ -65,7 +65,7 @@ check_authorities() {
     exit 1
   }
 
-  for source in kernel/asense_rgb.c kernel/Makefile kernel/LICENSE; do
+  for source in kernel/asense_rgb.c kernel/asense_rgb_policy.h kernel/Makefile kernel/LICENSE; do
     require_line "$source usr/src/asense-rgb-$version" debian/asense.install
   done
   require_line "docs/RELEASE_NOTES_v$version.md" debian/asense.docs

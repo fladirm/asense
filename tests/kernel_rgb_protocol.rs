@@ -54,11 +54,8 @@ fn static_rgb_transaction_keeps_the_verified_wmi_order() {
         "asense_read_effect(rgb, &actual)",
     ];
     let body = compact(body);
-    assert!(
-        body.contains(
-            "struct asense_effect static_mode = asense_static_effect(zones->brightness);"
-        )
-    );
+    assert!(body.contains("struct asense_effect static_mode = asense_static_effect(rgb, zones);"));
+    let body = &body[body.find("if (!count)").expect("reference zoned path")..];
     let mut previous = 0;
     for call in calls {
         let position = body
@@ -443,12 +440,13 @@ fn static_power_reenable_reuses_the_full_transaction() {
     let body = body("power_store", "battery_limit_show");
     assert!(!body.contains("asense_write_zone("));
     assert!(body.contains(
-        "if (!error && enabled && requested.mode == 0) { \
-         requested = asense_static_effect(requested.brightness); \
+        "if (!error && requested.mode == 0) { \
          requested_zones = previous_zones; \
          requested_zones.brightness = requested.brightness; \
+         requested = asense_static_effect(rgb, &requested_zones); \
+         if (enabled) { \
          static_reenable = true; \
-         error = asense_write_zones(rgb, &requested_zones); }"
+         error = asense_write_zones(rgb, &requested_zones); } }"
     ));
     assert!(
         body.contains(
@@ -460,10 +458,9 @@ fn static_power_reenable_reuses_the_full_transaction() {
 #[test]
 fn static_rgb_payloads_are_byte_exact() {
     let static_effect = body("asense_static_effect", "asense_read_zone");
-    assert!(static_effect.contains(
-        "return (struct asense_effect) { .mode = 0, .brightness = brightness, \
-         .engine = ASENSE_STATIC_ENGINE, };"
-    ));
+    assert!(
+        static_effect.contains("return asense_policy_static_effect(rgb->lighting_flags, zones);")
+    );
 
     let effect = body("asense_write_effect", "asense_engine_for_mode");
     assert!(effect.contains(
@@ -513,12 +510,15 @@ fn confirmed_rgb_state_is_cached_at_probe_and_after_mutations() {
         .find("error = asense_read_rgb_state(rgb, &effect, &zones);")
         .expect("probe must read the complete RGB state");
     let probe_validate = probe
-        .find("if (!asense_effect_valid(&effect))")
+        .find("if (!asense_policy_read_valid(rgb->lighting_flags, &effect))")
         .expect("probe must reject an unsafe effect before caching it");
     let probe_cache = probe
         .find("asense_cache_rgb_state(rgb, &effect, &zones);")
         .expect("probe must cache the confirmed RGB state");
     assert!(probe_read < probe_validate && probe_validate < probe_cache);
+    assert!(probe.contains(
+        "if (asense_effect_valid(rgb, &effect)) asense_cache_rgb_state(rgb, &effect, &zones);"
+    ));
 
     for (start, end) in [
         ("static ssize_t effect_store", "static ssize_t zones_show"),

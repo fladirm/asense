@@ -1,0 +1,631 @@
+{
+  "schema": 3,
+  "provenance": {
+    "report": "asense-probe",
+    "asense_version": "0.3.0",
+    "build_commit": null,
+    "captured_at_utc": "2026-08-02T13:23:14Z",
+    "capture_duration_ms": 155,
+    "mode": "passive",
+    "daemon": {
+      "status": "value",
+      "source": "control-socket",
+      "value": {
+        "protocol": 2,
+        "version": "0.3.0"
+      }
+    }
+  },
+  "machine": {
+    "dmi": {
+      "vendor": {
+        "status": "value",
+        "source": "dmi-vendor",
+        "value": "Acer"
+      },
+      "product": {
+        "status": "value",
+        "source": "dmi-product",
+        "value": "Predator PH18-73"
+      },
+      "board": {
+        "status": "value",
+        "source": "dmi-board",
+        "value": "Vantage_ARX"
+      },
+      "bios": {
+        "status": "value",
+        "source": "dmi-bios",
+        "value": "V1.54"
+      }
+    },
+    "kernel": {
+      "release": {
+        "status": "value",
+        "source": "uname",
+        "value": "7.1.5-gentoo-dist-bin"
+      },
+      "architecture": {
+        "status": "value",
+        "source": "uname",
+        "value": "x86_64"
+      }
+    },
+    "os": {
+      "id": {
+        "status": "value",
+        "source": "os-release",
+        "value": "gentoo"
+      },
+      "version_id": {
+        "status": "value",
+        "source": "os-release",
+        "value": "2.18"
+      }
+    }
+  },
+  "power": {
+    "ac": [
+      {
+        "ordinal": 0,
+        "kind": "mains",
+        "online": {
+          "status": "value",
+          "source": "power-supply",
+          "value": true
+        }
+      },
+      {
+        "ordinal": 1,
+        "kind": "usb",
+        "online": {
+          "status": "value",
+          "source": "power-supply",
+          "value": false
+        }
+      },
+      {
+        "ordinal": 2,
+        "kind": "usb",
+        "online": {
+          "status": "value",
+          "source": "power-supply",
+          "value": false
+        }
+      }
+    ],
+    "batteries": [
+      {
+        "ordinal": 0,
+        "present": {
+          "status": "value",
+          "source": "power-supply",
+          "value": true
+        },
+        "status": {
+          "status": "value",
+          "source": "power-supply",
+          "value": "full"
+        },
+        "capacity_percent": {
+          "status": "value",
+          "source": "power-supply",
+          "value": 100
+        }
+      },
+      {
+        "ordinal": 1,
+        "present": {
+          "status": "absent",
+          "source": "power-supply",
+          "reason": "not-exposed"
+        },
+        "status": {
+          "status": "value",
+          "source": "power-supply",
+          "value": "discharging"
+        },
+        "capacity_percent": {
+          "status": "absent",
+          "source": "power-supply",
+          "reason": "not-exposed"
+        }
+      }
+    ]
+  },
+  "drivers": {
+    "modules": [
+      {
+        "name": "acer_wmi",
+        "loaded": {
+          "status": "value",
+          "source": "module-sysfs",
+          "value": true
+        },
+        "version": {
+          "status": "absent",
+          "source": "module-sysfs",
+          "reason": "not-exposed"
+        }
+      },
+      {
+        "name": "asense_rgb",
+        "loaded": {
+          "status": "value",
+          "source": "module-sysfs",
+          "value": true
+        },
+        "version": {
+          "status": "value",
+          "source": "module-sysfs",
+          "value": "0.3.0"
+        }
+      }
+    ],
+    "wmi": [
+      {
+        "guid": "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56",
+        "instances": 1,
+        "owner": {
+          "status": "value",
+          "source": "wmi-driver",
+          "value": "asense_rgb"
+        },
+        "groups": [
+          "asense_diagnostics",
+          "asense_rgb",
+          "gaming_fan"
+        ]
+      },
+      {
+        "guid": "79772EC5-04B1-4BFD-843C-61E7F77B6CC9",
+        "instances": 1,
+        "owner": {
+          "status": "value",
+          "source": "wmi-driver",
+          "value": "asense_rgb"
+        },
+        "groups": [
+          "asense_diagnostics",
+          "asense_battery"
+        ]
+      },
+      {
+        "guid": "61EF69EA-865C-4BC3-A502-A0DEBA0CB531",
+        "instances": 1,
+        "owner": {
+          "status": "value",
+          "source": "wmi-driver",
+          "value": "asense_rgb"
+        },
+        "groups": [
+          "asense_diagnostics",
+          "asense_apge"
+        ]
+      }
+    ],
+    "hwmon_owner": {
+      "status": "absent",
+      "source": "hwmon-driver",
+      "reason": "not-exposed"
+    }
+  },
+  "profile": {
+    "transport": {
+      "status": "present",
+      "source": "gaming-wmi-profile",
+      "backend": "gaming-wmi"
+    },
+    "current": {
+      "status": "unknown",
+      "source": "gaming-wmi-profile",
+      "raw": {
+        "encoding": "u8-hex",
+        "bytes": 1,
+        "value": "02"
+      }
+    },
+    "choices": {
+      "status": "absent",
+      "source": "known-gaming-wmi-commands",
+      "reason": "not-exposed"
+    },
+    "firmware_supported_bitmap": {
+      "status": "absent",
+      "source": "gaming-wmi-supported-profiles",
+      "reason": "not-exposed"
+    },
+    "physical_effect": "unverified"
+  },
+  "fans": {
+    "control": {
+      "status": "present",
+      "source": "gaming-wmi-fan",
+      "backend": "gaming-wmi",
+      "modes": {
+        "auto": true,
+        "manual": true,
+        "maximum": true
+      }
+    },
+    "rpm": [],
+    "pwm": [
+      {
+        "channel": 1,
+        "setpoint_unit": "percent",
+        "setpoint": {
+          "status": "value",
+          "source": "gaming-wmi-fan",
+          "value": 0
+        },
+        "mode": {
+          "status": "value",
+          "source": "gaming-wmi-fan",
+          "value": "maximum"
+        }
+      },
+      {
+        "channel": 2,
+        "setpoint_unit": "percent",
+        "setpoint": {
+          "status": "value",
+          "source": "gaming-wmi-fan",
+          "value": 0
+        },
+        "mode": {
+          "status": "value",
+          "source": "gaming-wmi-fan",
+          "value": "maximum"
+        }
+      }
+    ],
+    "temperatures": []
+  },
+  "platform": {
+    "transport": {
+      "status": "present",
+      "source": "platform-discovery",
+      "backend": "gaming-wmi"
+    },
+    "fields": [
+      {
+        "name": "battery-limit",
+        "expected": true,
+        "exposed": true,
+        "source": "asense-battery",
+        "read": {
+          "status": "value",
+          "source": "asense-battery",
+          "value": {
+            "type": "bool",
+            "value": false
+          }
+        }
+      },
+      {
+        "name": "battery-calibration",
+        "expected": true,
+        "exposed": true,
+        "source": "asense-battery",
+        "read": {
+          "status": "value",
+          "source": "asense-battery",
+          "value": {
+            "type": "bool",
+            "value": false
+          }
+        }
+      },
+      {
+        "name": "usb-off-charging",
+        "expected": true,
+        "exposed": true,
+        "source": "asense-apge",
+        "read": {
+          "status": "value",
+          "source": "asense-apge",
+          "value": {
+            "type": "usb-threshold",
+            "value": 30
+          }
+        }
+      },
+      {
+        "name": "keyboard-timeout",
+        "expected": true,
+        "exposed": true,
+        "source": "asense-apge",
+        "read": {
+          "status": "value",
+          "source": "asense-apge",
+          "value": {
+            "type": "bool",
+            "value": false
+          }
+        }
+      },
+      {
+        "name": "boot-sound",
+        "expected": true,
+        "exposed": true,
+        "source": "asense-rgb",
+        "read": {
+          "status": "value",
+          "source": "asense-rgb",
+          "value": {
+            "type": "bool",
+            "value": false
+          }
+        }
+      },
+      {
+        "name": "lcd-override",
+        "expected": true,
+        "exposed": true,
+        "source": "asense-rgb",
+        "read": {
+          "status": "value",
+          "source": "asense-rgb",
+          "value": {
+            "type": "bool",
+            "value": true
+          }
+        }
+      },
+      {
+        "name": "rear-logo",
+        "expected": true,
+        "exposed": false,
+        "source": "asense-rgb",
+        "read": {
+          "status": "error",
+          "source": "asense-rgb",
+          "error": {
+            "stage": "decode",
+            "class": "invalid-value",
+            "errno": null,
+            "raw": {
+              "encoding": "scalar-hex",
+              "bytes": 8,
+              "value": "0000aec764050000"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "lighting": [],
+  "hid": [
+    {
+      "role": "enek5130-lighting",
+      "identity": {
+        "bus": "i2c",
+        "vid": "0cf2",
+        "pid": "5130",
+        "name": "ENEK5130",
+        "interface": null,
+        "usage_page": null,
+        "usage": null
+      },
+      "driver": {
+        "status": "value",
+        "source": "hid-driver",
+        "value": "hid-generic"
+      },
+      "descriptor": {
+        "status": "value",
+        "source": "hid-report-descriptor",
+        "value": {
+          "bytes": 1202,
+          "sha256": "758e8abc235e67acbe9519e688324f82d5e5f71083f5735623abb5159117c5bb",
+          "feature_reports": [
+            {
+              "id": "01",
+              "bytes": 23
+            },
+            {
+              "id": "02",
+              "bytes": 3
+            },
+            {
+              "id": "03",
+              "bytes": 29
+            },
+            {
+              "id": "04",
+              "bytes": 51
+            },
+            {
+              "id": "05",
+              "bytes": 10
+            },
+            {
+              "id": "06",
+              "bytes": 2
+            },
+            {
+              "id": "07",
+              "bytes": 23
+            },
+            {
+              "id": "08",
+              "bytes": 3
+            },
+            {
+              "id": "09",
+              "bytes": 29
+            },
+            {
+              "id": "0a",
+              "bytes": 51
+            },
+            {
+              "id": "0b",
+              "bytes": 10
+            },
+            {
+              "id": "0c",
+              "bytes": 2
+            },
+            {
+              "id": "0d",
+              "bytes": 23
+            },
+            {
+              "id": "0e",
+              "bytes": 3
+            },
+            {
+              "id": "0f",
+              "bytes": 29
+            },
+            {
+              "id": "10",
+              "bytes": 51
+            },
+            {
+              "id": "11",
+              "bytes": 10
+            },
+            {
+              "id": "12",
+              "bytes": 2
+            },
+            {
+              "id": "a1",
+              "bytes": 5
+            },
+            {
+              "id": "a2",
+              "bytes": 2
+            },
+            {
+              "id": "a3",
+              "bytes": 12
+            },
+            {
+              "id": "a4",
+              "bytes": 11
+            }
+          ]
+        }
+      },
+      "a1": {
+        "status": "value",
+        "source": "hid-feature-a1",
+        "value": {
+          "requested_bytes": 5,
+          "returned_bytes": 5,
+          "payload": {
+            "encoding": "hex",
+            "bytes": 5,
+            "value": "a101650000"
+          },
+          "targets": [
+            "65"
+          ]
+        }
+      },
+      "extended": {
+        "requested": false,
+        "selectors": [],
+        "a3": []
+      }
+    },
+    {
+      "role": "acer-ec-hid-power-candidate",
+      "identity": {
+        "bus": "i2c",
+        "vid": "1025",
+        "pid": "174b",
+        "name": "Acer EC HID",
+        "interface": null,
+        "usage_page": null,
+        "usage": null
+      },
+      "driver": {
+        "status": "value",
+        "source": "hid-driver",
+        "value": "hid-generic"
+      },
+      "descriptor": {
+        "status": "value",
+        "source": "hid-report-descriptor",
+        "value": {
+          "bytes": 564,
+          "sha256": "8d1a582b08cb9e5d5f090975d28f8b97913b321b45a473be2873d3be199078c5",
+          "feature_reports": [
+            {
+              "id": "0b",
+              "bytes": 3
+            },
+            {
+              "id": "0c",
+              "bytes": 6
+            },
+            {
+              "id": "0d",
+              "bytes": 4
+            },
+            {
+              "id": "a0",
+              "bytes": 65
+            }
+          ]
+        }
+      },
+      "a1": null,
+      "extended": {
+        "requested": false,
+        "selectors": [],
+        "a3": []
+      }
+    }
+  ],
+  "privacy": {
+    "automatic_upload": false,
+    "persistent_report_id": false,
+    "default_mutations": [],
+    "extended_mutations": [],
+    "excluded": [
+      "serials",
+      "uuids",
+      "hostname",
+      "user-identity",
+      "network-identity",
+      "boot-id",
+      "storage-identity",
+      "hid-serial-and-physical-path",
+      "journals",
+      "raw-acpi-tables",
+      "absolute-device-paths",
+      "environment"
+    ],
+    "bounded_raw": [
+      {
+        "path": "profile.current.raw",
+        "max_bytes": 48
+      },
+      {
+        "path": "profile.choices.value[].transport_raw",
+        "max_bytes": 1
+      },
+      {
+        "path": "profile.firmware_supported_bitmap.value.raw",
+        "max_bytes": 1
+      },
+      {
+        "path": "platform.fields[].read.error.raw",
+        "max_bytes": 8
+      },
+      {
+        "path": "hid[].a1.value.payload",
+        "max_bytes": 64
+      },
+      {
+        "path": "hid[].extended.a3[].read.value.payload",
+        "max_bytes": 64
+      }
+    ]
+  }
+}

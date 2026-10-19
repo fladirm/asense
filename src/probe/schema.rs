@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub(super) const PROBE_SCHEMA: u8 = 3;
+pub(super) const PROBE_SCHEMA: u8 = 4;
 pub(super) const MAX_REPORT_BYTES: usize = 262_144;
 pub(super) const MAX_TEXT_BYTES: usize = 96;
 pub(super) const MAX_COMMAND_BYTES: usize = 48;
@@ -601,6 +601,7 @@ pub struct HidEvidence {
 pub enum HidRole {
     Enek5130Lighting,
     AcerEcHidPowerCandidate,
+    DarfonLightingCandidate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -628,6 +629,8 @@ pub enum HidName {
     Enek5130,
     #[serde(rename = "Acer EC HID")]
     AcerEcHid,
+    #[serde(rename = "Darfon USB HID")]
+    DarfonUsbHid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -740,7 +743,10 @@ pub struct RawAllowance {
 
 impl ProbeReport {
     pub fn validate(&self) -> Result<(), String> {
-        require(self.schema == PROBE_SCHEMA, "probe schema must be 3")?;
+        require(
+            matches!(self.schema, 3 | PROBE_SCHEMA),
+            "probe schema must be 3 or 4",
+        )?;
         require(
             self.provenance.report == "asense-probe",
             "invalid report token",
@@ -764,7 +770,7 @@ impl ProbeReport {
         validate_machine(&self.machine)?;
         validate_power(&self.power)?;
         validate_drivers(&self.drivers)?;
-        validate_profile(&self.profile)?;
+        validate_profile(&self.profile, self.schema)?;
         validate_fans(&self.fans)?;
         validate_platform(&self.platform)?;
         require(
@@ -786,6 +792,10 @@ impl ProbeReport {
         }
         require(self.hid.len() <= MAX_ITEMS, "too many HID devices")?;
         for (index, hid) in self.hid.iter().enumerate() {
+            require(
+                self.schema >= 4 || hid.role != HidRole::DarfonLightingCandidate,
+                "schema 3 cannot contain USB lighting candidates",
+            )?;
             validate_hid(hid)?;
             if index > 0 {
                 require(
@@ -886,13 +896,25 @@ fn validate_drivers(drivers: &DriverEvidence) -> Result<(), String> {
     })
 }
 
-fn validate_profile(profile: &ProfileEvidence) -> Result<(), String> {
+fn validate_profile(profile: &ProfileEvidence, schema: u8) -> Result<(), String> {
     validate_backend_transport(&profile.transport)?;
+    let generic_performance = schema >= 4
+        && matches!(
+            profile.transport,
+            BackendTransport::Present {
+                backend: ProfileBackend::Kernel,
+                ..
+            }
+        );
     match &profile.current {
         ProfileCurrent::Known { raw, profile, .. } => {
             validate_profile_raw(raw)?;
             require(
-                profile_name_for_raw(raw) == Some(*profile),
+                profile_name_for_raw(raw) == Some(*profile)
+                    || (generic_performance
+                        && raw.encoding == RawEncoding::AsciiToken
+                        && raw.value == "performance"
+                        && *profile == ProfileName::Performance),
                 "known profile semantic does not match its raw authority",
             )?;
         }
@@ -917,7 +939,10 @@ fn validate_profile(profile: &ProfileEvidence) -> Result<(), String> {
                 "profile choices are not unique",
             )?;
             require(
-                profile_name_for_command(&choice.command) == Some(choice.profile),
+                profile_name_for_command(&choice.command) == Some(choice.profile)
+                    || (generic_performance
+                        && choice.command == "performance"
+                        && choice.profile == ProfileName::Performance),
                 "profile choice command and semantic differ",
             )?;
             if let Some(raw) = &choice.transport_raw {
@@ -1103,13 +1128,14 @@ fn validate_hid(hid: &HidEvidence) -> Result<(), String> {
         require(is_hex(usage, 4), "HID usage is invalid")?;
     }
     require(
-        hid.identity.bus == HidBus::I2c && hid.identity.interface.is_none(),
-        "allow-listed HID-over-I2C identity has a fabricated interface",
+        hid.identity.interface.is_none(),
+        "passive HID identity has a fabricated interface",
     )?;
     match hid.role {
         HidRole::Enek5130Lighting => {
             require(
-                hid.identity.vid == "0cf2"
+                hid.identity.bus == HidBus::I2c
+                    && hid.identity.vid == "0cf2"
                     && hid.identity.pid == "5130"
                     && hid.identity.name == HidName::Enek5130,
                 "ENEK role and exact HID identity differ",
@@ -1118,12 +1144,32 @@ fn validate_hid(hid: &HidEvidence) -> Result<(), String> {
         }
         HidRole::AcerEcHidPowerCandidate => {
             require(
-                hid.identity.vid == "1025"
+                hid.identity.bus == HidBus::I2c
+                    && hid.identity.vid == "1025"
                     && hid.identity.pid == "174b"
                     && hid.identity.name == HidName::AcerEcHid,
                 "Acer EC-HID role and exact identity differ",
             )?;
             require(hid.a1.is_none(), "Acer EC-HID contains ENEK A1 evidence")?;
+        }
+        HidRole::DarfonLightingCandidate => {
+            require(
+                hid.identity.bus == HidBus::Usb
+                    && hid.identity.vid == "0d62"
+                    && hid.identity.pid == "ba51"
+                    && hid.identity.name == HidName::DarfonUsbHid,
+                "Darfon role and exact USB identity differ",
+            )?;
+            require(
+                hid.a1.is_none(),
+                "Darfon candidate contains ENEK A1 evidence",
+            )?;
+            require(
+                !hid.extended.requested
+                    && hid.extended.selectors.is_empty()
+                    && hid.extended.a3.is_empty(),
+                "Darfon candidate contains active ENEK evidence",
+            )?;
         }
     }
     require(

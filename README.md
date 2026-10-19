@@ -36,6 +36,12 @@ other models and shows only the controls found on the machine.
 Missing capabilities are hidden independently: a notebook can have profiles
 and RPM without fan writes, or lighting without battery options.
 
+Auto and Maximum do not require RPM sensors or temperature telemetry. Manual
+control requires readable CPU/GPU setpoints and valid CPU/GPU watchdog
+temperatures. An unavailable reading is displayed as unavailable, not zero.
+A verified firmware mode or speed setpoint does not prove the physical fan
+speed; tachometer readings and observed cooling remain separate evidence.
+
 ## Supported hardware
 
 <!-- markdownlint-disable MD013 MD033 -->
@@ -49,7 +55,12 @@ and RPM without fan writes, or lighting without battery options.
 | <code>PH16&#8209;71</code> | 🟢 | 🟢·🔎 | 🔎 | 🔎 |
 | <code>PH18&#8209;71</code> | 🟢 | 🟢·🔎 | 🔎 | 🔎 |
 | <code>PHN14&#8209;51</code> | 🔎 | 🔎 | 🟡 | 🔎 |
-| <code>PHN16S&#8209;71</code> | 🔎 | 🔎 | 🟡 | 🔎 |
+| <code>PHN16S&#8209;71</code> | 🤝 | 🤝 | 🟡 | 🔎 |
+| <code>PH18&#8209;73</code> | 🔎 | 🤝·🔎 | 🔎 | 🔎 |
+| <code>AN17&#8209;51</code> | 🔎 | 🔎 | 🤝 | 🔎 |
+| <code>AN14&#8209;41</code> | 🔎 | 🔎 | 🤝 | 🔎 |
+| <code>AN16&#8209;51</code> | 🔎 | 🤝·🔎 | 🤝 | 🔎 |
+| <code>ANV15&#8209;52</code> | 🔎 | 🔎 | 🔎 | 🔎 |
 | <code>PHN16&#8209;73</code> | 🔎 | 🔎 | 🟡 | 🔎 |
 | <code>AN16S&#8209;61</code> | 🔎 | 🔎 | 🔎 | 🔎 |
 | <code>AN515&#8209;45</code> | 🔎 | 🔎 | 🟡 | 🔎 |
@@ -71,11 +82,37 @@ and RPM without fan writes, or lighting without battery options.
 
 **Legend:** ✅ Reference tested · 🟢 Linux provides it · 🟡 Known Acer
 controller/protocol · 🔎 Enabled only when the live probe finds it ·
-🟢·🔎 RPM is available, fan control is probed · 🤝 Community confirmed.
+🟢·🔎 RPM is available, fan control is probed · 🤝 Community confirmed ·
+🤝·🔎 Only the specifically reported fan capability is confirmed.
 
 PHN16-72 is the full reference platform. PHN14-51 has a known three-zone WMI
 layout; PHN16S-71 and PHN16-73 use ENEK5130 lighting. Yellow does not force a
 control: it still appears only after the controller answers correctly.
+
+Some Predator models that the in-kernel `acer_wmi` driver does not list yet,
+such as PHN16S-71, need its PredatorSense v4 support enabled explicitly. It
+exposes fan RPM, the CPU/GPU temperatures Manual fan mode requires, and the
+kernel platform profile (with `performance` as the firmware's Turbo mode)
+through the signed Ubuntu module, so it also works with Secure Boot. This was
+reported on PHN16S-71, board FTYPE_ARX, BIOS V1.26; it is an opt-in kernel
+configuration for that cohort, not an automatic setting for every Acer:
+
+```bash
+echo "options acer_wmi predator_v4=1" | sudo tee /etc/modprobe.d/acer-wmi-predator.conf
+sudo update-initramfs -u
+```
+
+Reboot after changing this option. To undo it, remove that configuration file,
+run `sudo update-initramfs -u` and reboot. The option must be present in the
+installed kernel (`modinfo acer_wmi`); ASense does not replace the signed driver.
+
+Community confirmations apply to individual capabilities and builds. PH18-73
+reports Auto/Maximum without RPM, and its raw profile `0x02` remains unknown.
+AN17-51 has an exact static-lighting quirk; AN14-41 accepts its documented boot
+record without using that record for writes. AN16-51 exposes one logical
+global-color zone because independent zone writes are not confirmed.
+The fixes still need testing on the reporters' machines. See the
+[capability evidence and remaining limits](docs/SUPPORTED_HARDWARE.md).
 
 <!-- markdownlint-disable MD033 -->
 <details>
@@ -143,7 +180,7 @@ lighting: zoned WMI or a detected ENEK5130 target
 Kernel-backed profile choices come from the live kernel `choices` interface.
 The Gaming-WMI fallback instead exposes the driver's bounded set of known
 commands; it is not a firmware-enumerated list. The probe makes this distinction
-explicit as `profiles.choices_source = kernel-live` or
+explicit as `profile.choices.source = kernel-platform-profile` or
 `known-gaming-wmi-commands`.
 
 The battery 80% health limit is a firmware setting, not a Linux charge
@@ -189,9 +226,9 @@ Download the installer ZIP and matching `.zip.sha256` from the Release page,
 then verify and install it as the logged-in desktop user (not with `sudo`):
 
 ```bash
-sha256sum --check asense-v0.3.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
-unzip asense-v0.3.0-ubuntu-26.04-x86_64-installer-*.zip
-cd asense-v0.3.0-ubuntu-26.04-x86_64-installer-*/
+sha256sum --check asense-v0.4.0-ubuntu-26.04-x86_64-installer-*.zip.sha256
+unzip asense-v0.4.0-ubuntu-26.04-x86_64-installer-*.zip
+cd asense-v0.4.0-ubuntu-26.04-x86_64-installer-*/
 ./install.sh
 ```
 
@@ -209,9 +246,12 @@ state whose later purge could otherwise affect the standalone installation.
 
 ### Arch Linux / AUR
 
-The stable [`asense`](https://aur.archlinux.org/packages/asense) AUR source
-package builds ASense and its DKMS transport from the tagged source with the
-system Rust toolchain. Clone and install it as your regular build user:
+The `asense` AUR source-package templates build ASense and its DKMS transport
+from the tagged source with the system Rust toolchain. First publication is
+pending. Check the
+[AUR package page](https://aur.archlinux.org/packages/asense) before using
+the following commands; they require a published package. Clone and install
+as your regular build user:
 
 ```bash
 git clone https://aur.archlinux.org/asense.git
@@ -237,8 +277,8 @@ asense probe > asense-probe.json
 asense probe --summary
 ```
 
-Close the ASense window first so the one-shot probe can use the daemon's
-single control session. The first command creates the authoritative schema-3
+The probe can run while the ASense window is open. The first command creates
+the authoritative schema-4
 JSON attachment. The second prints a compact human-readable view of a fresh
 capture; it does not replace the JSON evidence.
 
@@ -251,6 +291,8 @@ HID serial/physical paths, journals, raw ACPI tables, absolute device paths and
 the process environment. Review it before sharing; the exact collection,
 privacy and support-state contract is documented in
 [Probe privacy and support workflow](docs/PROBE_PRIVACY.md).
+The current reader also accepts the original schema-3 reports; runtime control
+continues to negotiate `HELLO 2`.
 
 Uninstall with the copy retained by the installer:
 
@@ -258,8 +300,9 @@ Uninstall with the copy retained by the installer:
 /usr/libexec/asense/uninstall.sh
 ```
 
-Uninstall returns an active fan session to Auto, removes ASense services,
-DKMS/HWDB/udev integration and the desktop entry. Other firmware settings
+Uninstall requests and verifies Auto when fan control is available and reports
+an absent interface separately. It removes ASense services, DKMS/HWDB/udev
+integration and the desktop entry. Other firmware settings
 (profile, lighting, charge limit and similar choices) remain configured.
 
 ### Secure Boot

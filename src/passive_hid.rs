@@ -1,7 +1,7 @@
-//! Bounded passive HID evidence for probe schema 3.
+//! Bounded passive HID evidence for probe schema 4.
 //!
 //! This module is intentionally independent from lighting discovery.  It
-//! accepts only two exact HID-over-I2C identities, hashes and decodes their
+//! accepts exact allow-listed I2C and USB identities, hashes and decodes their
 //! report descriptors, and may issue one descriptor-sized GET_FEATURE for the
 //! ENEK A1 target list.  It contains no selector, feature write, caller-chosen
 //! device path or semantic target mapping.
@@ -20,10 +20,15 @@ use crate::passive_diagnostics::{
 };
 
 const HID_BUS_I2C: u32 = 0x0018;
+const HID_BUS_USB: u32 = 0x0003;
 const ENEK_VENDOR: u32 = 0x0cf2;
 const ENEK_PRODUCT: u32 = 0x5130;
 const ACER_EC_VENDOR: u32 = 0x1025;
 const ACER_EC_PRODUCT: u32 = 0x174b;
+// Public PH16-72 report in issue #3. Descriptor collection only: this is
+// neither an ENEK device nor evidence for a working lighting command.
+const DARFON_VENDOR: u32 = 0x0d62;
+const DARFON_PRODUCT: u32 = 0xba51;
 const REPORT_TARGET_LIST: u8 = 0xa1;
 
 const MAX_HIDRAW_ENTRIES: usize = 256;
@@ -44,12 +49,14 @@ const MAX_DRIVER_BYTES: usize = 64;
 pub(crate) enum DiagnosticHidRole {
     Enek5130Lighting,
     AcerEcHidPowerCandidate,
+    DarfonLightingCandidate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DiagnosticHidBus {
     I2c,
+    Usb,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -58,6 +65,8 @@ pub(crate) enum DiagnosticHidName {
     Enek5130,
     #[serde(rename = "Acer EC HID")]
     AcerEcHid,
+    #[serde(rename = "Darfon USB HID")]
+    DarfonUsbHid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -242,6 +251,8 @@ where
 fn compare_hid(left: &DiagnosticHid, right: &DiagnosticHid) -> std::cmp::Ordering {
     left.role
         .cmp(&right.role)
+        .then_with(|| left.identity.vid.cmp(&right.identity.vid))
+        .then_with(|| left.identity.pid.cmp(&right.identity.pid))
         .then_with(|| left.identity.usage_page.cmp(&right.identity.usage_page))
         .then_with(|| left.identity.usage.cmp(&right.identity.usage))
         .then_with(|| descriptor_hash(left).cmp(descriptor_hash(right)))
@@ -320,6 +331,10 @@ fn parse_allowlisted_identity(uevent: &[u8]) -> Option<(DiagnosticHidRole, Diagn
                 DiagnosticHidRole::AcerEcHidPowerCandidate,
                 DiagnosticHidName::AcerEcHid,
             ),
+            (HID_BUS_USB, DARFON_VENDOR, DARFON_PRODUCT) => (
+                DiagnosticHidRole::DarfonLightingCandidate,
+                DiagnosticHidName::DarfonUsbHid,
+            ),
             _ => return None,
         };
         if parsed.is_some() {
@@ -328,12 +343,16 @@ fn parse_allowlisted_identity(uevent: &[u8]) -> Option<(DiagnosticHidRole, Diagn
         parsed = Some((
             identity.0,
             DiagnosticHidIdentity {
-                bus: DiagnosticHidBus::I2c,
+                bus: if bus == HID_BUS_USB {
+                    DiagnosticHidBus::Usb
+                } else {
+                    DiagnosticHidBus::I2c
+                },
                 vid: u16::try_from(vendor).ok()?,
                 pid: u16::try_from(product).ok()?,
                 name: identity.1,
-                // Both allow-listed devices are HID-over-I2C.  A USB
-                // interface number would be fabricated here, so it is absent.
+                // HID_ID contains no USB interface number. Leave it absent
+                // rather than inferring one from a volatile hidraw index.
                 interface: None,
                 usage_page: None,
                 usage: None,
@@ -772,18 +791,30 @@ pub(crate) fn validate_inventory(inventory: &[DiagnosticHid]) -> Result<(), Stri
 fn validate_hid(hid: &DiagnosticHid) -> Result<(), String> {
     let expected = match hid.role {
         DiagnosticHidRole::Enek5130Lighting => (
+            DiagnosticHidBus::I2c,
             ENEK_VENDOR as u16,
             ENEK_PRODUCT as u16,
             DiagnosticHidName::Enek5130,
         ),
         DiagnosticHidRole::AcerEcHidPowerCandidate => (
+            DiagnosticHidBus::I2c,
             ACER_EC_VENDOR as u16,
             ACER_EC_PRODUCT as u16,
             DiagnosticHidName::AcerEcHid,
         ),
+        DiagnosticHidRole::DarfonLightingCandidate => (
+            DiagnosticHidBus::Usb,
+            DARFON_VENDOR as u16,
+            DARFON_PRODUCT as u16,
+            DiagnosticHidName::DarfonUsbHid,
+        ),
     };
-    if hid.identity.bus != DiagnosticHidBus::I2c
-        || (hid.identity.vid, hid.identity.pid, hid.identity.name) != expected
+    if (
+        hid.identity.bus,
+        hid.identity.vid,
+        hid.identity.pid,
+        hid.identity.name,
+    ) != expected
         || hid.identity.interface.is_some()
         || hid.identity.usage_page.is_some() != hid.identity.usage.is_some()
     {
@@ -831,9 +862,9 @@ fn validate_hid(hid: &DiagnosticHid) -> Result<(), String> {
         (DiagnosticHidRole::Enek5130Lighting, None) => {
             return Err("ENEK passive HID evidence omits A1 status".to_string());
         }
-        (DiagnosticHidRole::AcerEcHidPowerCandidate, None) => {}
-        (DiagnosticHidRole::AcerEcHidPowerCandidate, Some(_)) => {
-            return Err("Acer EC-HID candidate contains ENEK A1 evidence".to_string());
+        (_, None) => {}
+        (_, Some(_)) => {
+            return Err("non-ENEK HID candidate contains ENEK A1 evidence".to_string());
         }
     }
     Ok(())
@@ -1037,6 +1068,41 @@ mod tests {
         assert_eq!(inventory[0].identity.usage, Some(0x0001));
         assert!(inventory[0].a1.is_none());
         validate_inventory(&inventory).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn darfon_usb_candidate_reads_only_the_descriptor_even_when_it_advertises_a1() {
+        let root = test_root();
+        let device = root.join("sys/class/hidraw/hidraw3/device");
+        fs::create_dir_all(&device).unwrap();
+        fs::write(device.join("uevent"), b"HID_ID=0003:00000D62:0000BA51\n").unwrap();
+        fs::write(device.join("report_descriptor"), descriptor_with_reports()).unwrap();
+        let mut reader = |_: &Path, _: u8, _: usize| -> Result<Vec<u8>, DiagnosticError> {
+            panic!("Darfon discovery must not send ENEK feature requests")
+        };
+        let inventory = collect_at_with(&root, &mut reader);
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(
+            inventory[0].role,
+            DiagnosticHidRole::DarfonLightingCandidate
+        );
+        assert_eq!(inventory[0].identity.bus, DiagnosticHidBus::Usb);
+        assert!(matches!(
+            inventory[0].descriptor,
+            DiagnosticObservation::Value { .. }
+        ));
+        assert!(inventory[0].a1.is_none());
+        validate_inventory(&inventory).unwrap();
+
+        let mut wrong = inventory[0].clone();
+        wrong.identity.bus = DiagnosticHidBus::I2c;
+        assert!(validate_hid(&wrong).is_err());
+        wrong = inventory[0].clone();
+        wrong.a1 = Some(DiagnosticObservation::absent(DiagnosticAbsence::NotExposed));
+        assert!(validate_hid(&wrong).is_err());
+        assert!(parse_allowlisted_identity(b"HID_ID=0003:00000D62:0000BA52\n").is_none());
+        assert!(parse_allowlisted_identity(b"HID_ID=0018:00000D62:0000BA51\n").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
