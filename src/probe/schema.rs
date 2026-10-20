@@ -1300,10 +1300,10 @@ fn a1_targets_from_payload(value: &str) -> Result<Vec<String>, String> {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    require(value.len().is_multiple_of(2), "hex payload has odd length")?;
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    require(remainder.is_empty(), "hex payload has odd length")?;
+    pairs
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair).expect("hex pair is ASCII");
             u8::from_str_radix(pair, 16).map_err(|_| "hex payload is invalid".to_string())

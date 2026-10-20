@@ -231,12 +231,21 @@ struct ClientPermit(Arc<AtomicUsize>);
 
 impl ClientPermit {
     fn acquire(active: Arc<AtomicUsize>) -> Result<Self, String> {
-        active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_CONTROL_CLIENTS).then_some(count + 1)
-            })
-            .map_err(|_| "too many ASense control clients".to_string())?;
-        Ok(Self(active))
+        let mut count = active.load(Ordering::Acquire);
+        loop {
+            if count >= MAX_CONTROL_CLIENTS {
+                return Err("too many ASense control clients".to_string());
+            }
+            match active.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self(active)),
+                Err(observed) => count = observed,
+            }
+        }
     }
 }
 
@@ -1571,6 +1580,44 @@ mod tests {
         drop(replacement);
         drop(permits);
         assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn simultaneous_client_admission_never_exceeds_capacity() {
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let active = Arc::new(AtomicUsize::new(0));
+        let begin = Arc::new(Barrier::new(17));
+        let admitted = Arc::new(Barrier::new(17));
+        let release = Arc::new(Barrier::new(17));
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            let (active, begin, admitted, release) = (
+                active.clone(),
+                begin.clone(),
+                admitted.clone(),
+                release.clone(),
+            );
+            threads.push(std::thread::spawn(move || {
+                begin.wait();
+                let permit = super::ClientPermit::acquire(active);
+                admitted.wait();
+                release.wait();
+                permit.is_ok()
+            }));
+        }
+        begin.wait();
+        admitted.wait();
+        assert_eq!(active.load(Ordering::Acquire), super::MAX_CONTROL_CLIENTS);
+        release.wait();
+        let accepted = threads
+            .into_iter()
+            .map(|thread| usize::from(thread.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(accepted, super::MAX_CONTROL_CLIENTS);
+        assert_eq!(active.load(Ordering::Acquire), 0);
     }
 
     #[test]

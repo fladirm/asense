@@ -1,3 +1,11 @@
+asense (0.4.0-1~local2) resolute; urgency=medium
+
+  * Keep bounded atomic admission compatible with both the installed system
+    compiler and newer Rust, and use typed slice chunks in the probe decoder.
+  * Preserve strict Clippy and verify simultaneous admission under contention.
+
+ -- Fladirmacht <fladirmacht@gmail.com>  Tue, 20 Oct 2026 02:10:00 +0200
+
 asense (0.4.0-1~local1) resolute; urgency=medium
 
   * Repair mode-only/ENXIO fan discovery and re-discover hardware before writes.
