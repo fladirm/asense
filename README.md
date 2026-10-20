@@ -204,12 +204,12 @@ sudo apt install ./asense-v0.4.0-ubuntu-26.04-amd64.deb
 
 The package version is `0.4.0-1~local2`. It upgrades an existing DEB/PPA
 installation together with the daemon and DKMS source, and sorts below the
-planned PPA revision so normal APT updates can replace it later.
+PPA revision so normal APT updates can replace it automatically.
 
 ### Ubuntu PPA
 
-The PPA currently provides **0.3.0** while publication of the signed 0.4.0
-source upload is pending. Use the DEB above for the 0.4.0 fixes.
+The [ASense PPA](https://launchpad.net/~fladirmacht/+archive/ubuntu/asense)
+provides **0.4.0** (`0.4.0-1~ppa1~resolute1`) for Ubuntu 26.04 amd64.
 
 On Ubuntu 26.04, install ASense and receive updates through APT:
 
