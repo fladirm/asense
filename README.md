@@ -190,7 +190,26 @@ when firmware prevents a subsequent charge from exceeding the limit.
 
 ## Install
 
-### Ubuntu PPA (recommended)
+### Ubuntu DEB (v0.4.0)
+
+On Ubuntu 26.04 amd64, download the
+[v0.4.0 DEB](https://github.com/fladirm/asense/releases/download/v0.4.0/asense-v0.4.0-ubuntu-26.04-amd64.deb)
+and its [SHA-256 file](https://github.com/fladirm/asense/releases/download/v0.4.0/asense-v0.4.0-ubuntu-26.04-amd64.deb.sha256),
+then verify and install them:
+
+```bash
+sha256sum --check asense-v0.4.0-ubuntu-26.04-amd64.deb.sha256
+sudo apt install ./asense-v0.4.0-ubuntu-26.04-amd64.deb
+```
+
+The package version is `0.4.0-1~local2`. It upgrades an existing DEB/PPA
+installation together with the daemon and DKMS source, and sorts below the
+planned PPA revision so normal APT updates can replace it later.
+
+### Ubuntu PPA
+
+The PPA currently provides **0.3.0** while publication of the signed 0.4.0
+source upload is pending. Use the DEB above for the 0.4.0 fixes.
 
 On Ubuntu 26.04, install ASense and receive updates through APT:
 
